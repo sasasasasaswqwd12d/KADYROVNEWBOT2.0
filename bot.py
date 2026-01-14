@@ -30,13 +30,13 @@ FAMILY_ROLES = {
     "leader": LEADER_ROLE_ID
 }
 
+# Роли, которые могут управлять заявками (от Recruit и выше)
 MANAGE_APPLICATIONS_ROLES = [
     FAMILY_ROLES["recruit"],
     FAMILY_ROLES["high_staff"],
-    FAMILY_ROLES["deputy_leader"]
+    FAMILY_ROLES["deputy_leader"],
+    FAMILY_ROLES["leader"]
 ]
-
-MANAGE_COMMANDS_ROLES = [LEADER_ROLE_ID, DEPUTY_LEADER_ROLE_ID, ADMIN_ROLE_ID]
 
 # === НАСТРОЙКА БОТА ===
 intents = discord.Intents.default()
@@ -106,6 +106,7 @@ def has_any_role(member: discord.Member, role_ids: list) -> bool:
 @bot.event
 async def on_ready():
     print(f'✅ Бот {bot.user} запущен!')
+    print(f'💡 Отправьте "!sync" для синхронизации слэш-команд.')
     bot.loop.create_task(change_status())
 
 @bot.event
@@ -133,24 +134,26 @@ async def change_status():
             await bot.change_presence(activity=status)
             await asyncio.sleep(30)
 
-# === КОМАНДА /sync (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА) ===
-@bot.tree.command(name="sync", description="Синхронизировать слэш-команды")
-async def sync_command(interaction: discord.Interaction):
-    if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message("❌ Только владелец может использовать эту команду.", ephemeral=True)
+# === КОМАНДА !sync (ПРЕФИКСНАЯ) ===
+@bot.command(name="sync")
+async def sync_command(ctx):
+    if ctx.author.id != OWNER_ID:
+        await ctx.send("❌ Только владелец может использовать эту команду.")
         return
     try:
         synced = await bot.tree.sync()
-        await interaction.response.send_message(f"✅ Синхронизировано {len(synced)} команд.", ephemeral=True)
+        await ctx.send(f"✅ Синхронизировано {len(synced)} слэш-команд.")
     except Exception as e:
-        await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
+        await ctx.send(f"❌ Ошибка синхронизации: {e}")
 
-# === КОМАНДА /набор ===
-@bot.tree.command(name="набор", description="Отправить форму набора в канал по ID")
-@app_commands.describe(channel_id="ID текстового канала для заявок")
+# === КОМАНДА /набор (ТОЛЬКО ЛИДЕР И ЗАМ) ===
+@bot.tree.command(name="набор", description="Открыть набор в указанном канале")
+@app_commands.describe(channel_id="ID канала, куда будут приходить заявки")
 async def recruitment(interaction: discord.Interaction, channel_id: str):
-    if not has_any_role(interaction.user, MANAGE_COMMANDS_ROLES):
-        await interaction.response.send_message("❌ У вас нет прав для использования этой команды.", ephemeral=True)
+    # Только Лидер и Заместитель
+    allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"]]
+    if not has_any_role(interaction.user, allowed_roles):
+        await interaction.response.send_message("❌ Эта команда доступна только Лидеру и Заместителю.", ephemeral=True)
         return
 
     try:
@@ -187,10 +190,11 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
             modal = ApplicationModal(target_channel=target_channel)
             await inter.response.send_modal(modal)
 
-    await target_channel.send(embed=embed, view=ApplyButton())
-    await interaction.response.send_message(f"✅ Форма отправлена в канал <#{cid}>.", ephemeral=True)
+    # Отправляем embed в ТОТ ЖЕ канал, где вызвана команда
+    await interaction.channel.send(embed=embed, view=ApplyButton())
+    await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
 
-# === МОДАЛЬНОЕ ОКНО (5 ПОЛЕЙ!) ===
+# === МОДАЛЬНОЕ ОКНО ЗАЯВКИ ===
 class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ"):
     def __init__(self, target_channel: discord.TextChannel):
         super().__init__()
@@ -246,8 +250,7 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
         embed.set_footer(text=f"Заявитель: {interaction.user} | ID: {interaction.user.id}")
 
         view = ApplicationControlView(applicant=interaction.user)
-        msg = await self.target_channel.send(embed=embed, view=view)
-        view.message = msg
+        await self.target_channel.send(embed=embed, view=view)
         await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
 
 # === УПРАВЛЕНИЕ ЗАЯВКОЙ ===
@@ -255,7 +258,6 @@ class ApplicationControlView(discord.ui.View):
     def __init__(self, applicant: discord.Member):
         super().__init__(timeout=None)
         self.applicant = applicant
-        self.message = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
@@ -280,17 +282,17 @@ class ApplicationControlView(discord.ui.View):
                 await self.applicant.add_roles(role)
         except discord.Forbidden:
             pass
-        embed = self.message.embeds[0]
+        embed = interaction.message.embeds[0]
         embed.color = discord.Color.green()
         embed.title = "✅ Заявка одобрена"
         for child in self.children:
             child.disabled = True
-        await self.message.edit(embed=embed, view=self)
+        await interaction.message.edit(embed=embed, view=self)
         await interaction.response.defer()
 
     @discord.ui.button(label="❌ Отказано", style=discord.ButtonStyle.red, emoji="🔴")
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RejectReasonModal(self.applicant, self.message))
+        await interaction.response.send_modal(RejectReasonModal(self.applicant, interaction.message))
 
 class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
     def __init__(self, applicant: discord.Member, message: discord.Message):
@@ -381,7 +383,8 @@ async def family_members(interaction: discord.Interaction):
 @bot.tree.command(name="состояние", description="Показать статистику пользователя по голосовым каналам")
 @app_commands.describe(user="Пользователь для проверки")
 async def user_state(interaction: discord.Interaction, user: discord.User):
-    if not has_any_role(interaction.user, MANAGE_COMMANDS_ROLES):
+    allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"], ADMIN_ROLE_ID]
+    if not has_any_role(interaction.user, allowed_roles):
         await interaction.response.send_message("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
         return
 
