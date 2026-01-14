@@ -16,7 +16,7 @@ if not TOKEN:
 # ⚠️ ЗАМЕНИТЕ НА СВОЙ ID ВЛАДЕЛЬЦА БОТА
 OWNER_ID = 1425864152563585158  # ← ОБЯЗАТЕЛЬНО ИЗМЕНИТЬ!
 
-# === ID РОЛЕЙ (как в вашем ТЗ) ===
+# === ID РОЛЕЙ ===
 LEADER_ROLE_ID = 605829120974258203
 DEPUTY_LEADER_ROLE_ID = 1220118511549026364
 ADMIN_ROLE_ID = 1460688847267565744
@@ -30,7 +30,6 @@ FAMILY_ROLES = {
     "leader": LEADER_ROLE_ID
 }
 
-# Роли, которые могут управлять заявками (от Recruit и выше)
 MANAGE_APPLICATIONS_ROLES = [
     FAMILY_ROLES["recruit"],
     FAMILY_ROLES["high_staff"],
@@ -47,7 +46,7 @@ intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ===
+# === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
@@ -96,7 +95,6 @@ def get_user_sessions(user_id: int):
     conn.close()
     return rows
 
-# === ПРОВЕРКА РОЛЕЙ ===
 def has_any_role(member: discord.Member, role_ids: list) -> bool:
     if member.guild_permissions.administrator:
         return True
@@ -134,7 +132,7 @@ async def change_status():
             await bot.change_presence(activity=status)
             await asyncio.sleep(30)
 
-# === КОМАНДА !sync (ПРЕФИКСНАЯ) ===
+# === !sync ===
 @bot.command(name="sync")
 async def sync_command(ctx):
     if ctx.author.id != OWNER_ID:
@@ -144,13 +142,12 @@ async def sync_command(ctx):
         synced = await bot.tree.sync()
         await ctx.send(f"✅ Синхронизировано {len(synced)} слэш-команд.")
     except Exception as e:
-        await ctx.send(f"❌ Ошибка синхронизации: {e}")
+        await ctx.send(f"❌ Ошибка: {e}")
 
-# === КОМАНДА /набор (ТОЛЬКО ЛИДЕР И ЗАМ) ===
+# === /набор (ИСПРАВЛЕНО!) ===
 @bot.tree.command(name="набор", description="Открыть набор в указанном канале")
 @app_commands.describe(channel_id="ID канала, куда будут приходить заявки")
 async def recruitment(interaction: discord.Interaction, channel_id: str):
-    # Только Лидер и Заместитель
     allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"]]
     if not has_any_role(interaction.user, allowed_roles):
         await interaction.response.send_message("❌ Эта команда доступна только Лидеру и Заместителю.", ephemeral=True)
@@ -190,11 +187,11 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
             modal = ApplicationModal(target_channel=target_channel)
             await inter.response.send_modal(modal)
 
-    # Отправляем embed в ТОТ ЖЕ канал, где вызвана команда
-    await interaction.channel.send(embed=embed, view=ApplyButton())
+    # ✅ Правильная последовательность: сначала response, потом followup
     await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
+    await interaction.followup.send(embed=embed, view=ApplyButton(), ephemeral=False)
 
-# === МОДАЛЬНОЕ ОКНО ЗАЯВКИ ===
+# === МОДАЛЬНОЕ ОКНО ===
 class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ"):
     def __init__(self, target_channel: discord.TextChannel):
         super().__init__()
@@ -321,7 +318,7 @@ class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
         await self.message.edit(embed=embed, view=None)
         await interaction.response.send_message("✅ Отказ обработан.", ephemeral=True)
 
-# === КОМАНДА /состав_семьи ===
+# === /состав_семьи ===
 @bot.tree.command(name="состав_семьи", description="Показать состав семьи по рангам")
 async def family_members(interaction: discord.Interaction):
     if not any(role.id == FAMILY_ROLES["member"] for role in interaction.user.roles):
@@ -379,7 +376,7 @@ async def family_members(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-# === КОМАНДА /состояние ===
+# === /состояние ===
 @bot.tree.command(name="состояние", description="Показать статистику пользователя по голосовым каналам")
 @app_commands.describe(user="Пользователь для проверки")
 async def user_state(interaction: discord.Interaction, user: discord.User):
