@@ -7,14 +7,13 @@ import asyncio
 import sqlite3
 from datetime import datetime, timezone
 
-# === ЗАГРУЗКА НАСТРОЕК ===
+# === ЗАГРУЗКА ТОКЕНА ===
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-
 if not TOKEN:
-    raise RuntimeError("❌ Токен не найден! Убедитесь, что файл .env содержит DISCORD_TOKEN=ваш_токен")
+    raise RuntimeError("❌ Файл .env должен содержать DISCORD_TOKEN=ваш_токен")
 
-# === ID РОЛЕЙ ===
+# === ID РОЛЕЙ (как в вашем ТЗ) ===
 LEADER_ROLE_ID = 605829120974258203
 DEPUTY_LEADER_ROLE_ID = 1220118511549026364
 ADMIN_ROLE_ID = 1460688847267565744  # для /набор и /состояние
@@ -28,28 +27,22 @@ FAMILY_ROLES = {
     "leader": LEADER_ROLE_ID
 }
 
+# Роли, которые могут управлять заявками
 MANAGE_APPLICATIONS_ROLES = [
     FAMILY_ROLES["recruit"],
     FAMILY_ROLES["high_staff"],
     FAMILY_ROLES["deputy_leader"]
 ]
 
+# Роли, которые могут использовать /набор и /состояние
 MANAGE_COMMANDS_ROLES = [LEADER_ROLE_ID, DEPUTY_LEADER_ROLE_ID, ADMIN_ROLE_ID]
 
-# === СТАТУСЫ БОТА ===
-STATUSES = [
-    discord.Game("Играет"),
-    discord.Activity(type=discord.ActivityType.watching, name="Спит"),
-    discord.Activity(type=discord.ActivityType.listening, name="Есть"),
-    discord.Game("Тролится")
-]
-
-# === НАСТРОЙКА ИНТЕНТОВ ===
+# === НАСТРОЙКА БОТА ===
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.voice_states = True
-intents.presences = True  # для отслеживания статусов
+intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -102,47 +95,60 @@ def get_user_sessions(user_id: int):
     conn.close()
     return rows
 
-# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
-def has_any_role(interaction: discord.Interaction, role_ids: list) -> bool:
-    if interaction.user.guild_permissions.administrator:
+# === ПРОВЕРКА РОЛЕЙ ===
+def has_any_role(member: discord.Member, role_ids: list) -> bool:
+    if member.guild_permissions.administrator:
         return True
-    return any(role.id in role_ids for role in interaction.user.roles)
+    return any(role.id in role_ids for role in member.roles)
 
 # === СОБЫТИЯ ===
 @bot.event
 async def on_ready():
-    print(f'✅ Бот {bot.user} успешно запущен!')
+    print(f'✅ Бот {bot.user} запущен и готов к работе!')
     bot.loop.create_task(change_status())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    now = datetime.now(timezone.utc)
     if member.bot:
         return
-
-    # Покинул все голосовые каналы
+    now = datetime.now(timezone.utc)
     if before.channel and not after.channel:
         end_voice_session(member.id, now)
-    # Перешёл в другой канал
     elif before.channel and after.channel and before.channel != after.channel:
         end_voice_session(member.id, now)
         add_voice_session(member.id, after.channel.id, now)
-    # Присоединился к каналу
     elif not before.channel and after.channel:
         add_voice_session(member.id, after.channel.id, now)
 
 async def change_status():
+    statuses = [
+        discord.Game("Играет"),
+        discord.Activity(type=discord.ActivityType.watching, name="Спит"),
+        discord.Activity(type=discord.ActivityType.listening, name="Есть"),
+        discord.Game("Тролится")
+    ]
     while True:
-        for status in STATUSES:
+        for status in statuses:
             await bot.change_presence(activity=status)
             await asyncio.sleep(30)
 
 # === КОМАНДА /набор ===
-@bot.tree.command(name="набор", description="Отправить форму набора в указанный канал")
-@app_commands.describe(channel="Канал, куда отправлять заявки")
-async def recruitment(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not has_any_role(interaction, MANAGE_COMMANDS_ROLES):
+@bot.tree.command(name="набор", description="Отправить форму набора в канал по ID")
+@app_commands.describe(channel_id="ID текстового канала для заявок")
+async def recruitment(interaction: discord.Interaction, channel_id: str):
+    if not has_any_role(interaction.user, MANAGE_COMMANDS_ROLES):
         await interaction.response.send_message("❌ У вас нет прав для использования этой команды.", ephemeral=True)
+        return
+
+    try:
+        cid = int(channel_id)
+    except ValueError:
+        await interaction.response.send_message("❌ ID канала должен быть числом.", ephemeral=True)
+        return
+
+    target_channel = interaction.guild.get_channel(cid)
+    if not target_channel or not isinstance(target_channel, discord.TextChannel):
+        await interaction.response.send_message("❌ Канал не найден или недоступен.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -154,7 +160,7 @@ async def recruitment(interaction: discord.Interaction, channel: discord.TextCha
             "🛡️ **Семья — это навсегда**\n\n"
             "Если ты хочешь стать частью чего-то большего — жми кнопку ниже!"
         ),
-        color=0xc41e3a  # Красный — цвет семьи
+        color=0xc41e3a
     )
     if interaction.guild.icon:
         embed.set_thumbnail(url=interaction.guild.icon.url)
@@ -164,58 +170,37 @@ async def recruitment(interaction: discord.Interaction, channel: discord.TextCha
             super().__init__(timeout=None)
 
         @discord.ui.button(label="📄 Подать заявку", style=discord.ButtonStyle.green, emoji="📝")
-        async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
-            modal = ApplicationModal(target_channel=channel)
-            await interaction.response.send_modal(modal)
+        async def apply(self, inter: discord.Interaction, button: discord.ui.Button):
+            modal = ApplicationModal(target_channel=target_channel)
+            await inter.response.send_modal(modal)
 
-    view = ApplyButton()
-    await channel.send(embed=embed, view=view)
-    await interaction.response.send_message(f"✅ Форма набора отправлена в {channel.mention}.", ephemeral=True)
+    await target_channel.send(embed=embed, view=ApplyButton())
+    await interaction.response.send_message(f"✅ Форма отправлена в канал <#{cid}>.", ephemeral=True)
 
 class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ"):
     def __init__(self, target_channel: discord.TextChannel):
         super().__init__()
         self.target_channel = target_channel
 
-        self.nick = discord.ui.TextInput(
-            label="Ваш никнейм на сервере",
-            placeholder="Пример: Nick Name",
-            required=True,
-            max_length=32
-        )
-        self.static_id = discord.ui.TextInput(
-            label="Ваш Static ID",
-            placeholder="Пример: 66666",
-            required=True,
-            max_length=10
-        )
-        self.age = discord.ui.TextInput(
-            label="Сколько вам лет в IRL?",
-            placeholder="Пример: 18",
-            required=True,
-            max_length=3
-        )
-        self.real_name = discord.ui.TextInput(
-            label="Ваше имя в IRL",
-            placeholder="Пример: Анатолий",
-            required=True,
-            max_length=30
-        )
-        self.playtime = discord.ui.TextInput(
-            label="Сколько времени уделяете игре?",
-            placeholder="Пример: 5 часов в день",
-            required=True,
-            max_length=50
-        )
-        self.source = discord.ui.TextInput(
-            label="Откуда узнали о семье?",
-            placeholder="TikTok / Друг / Discord",
-            required=True,
-            max_length=100
-        )
+        fields = [
+            ("nick", "Ваш никнейм на сервере", "Nick Name"),
+            ("static_id", "Ваш Static ID", "66666"),
+            ("age", "Сколько вам лет в IRL?", "18"),
+            ("real_name", "Ваше имя в IRL", "Анатолий"),
+            ("playtime", "Сколько времени уделяете игре?", "5 часов в день"),
+            ("source", "Откуда узнали о семье?", "TikTok / Друг")
+        ]
 
-        for item in [self.nick, self.static_id, self.age, self.real_name, self.playtime, self.source]:
-            self.add_item(item)
+        self.inputs = {}
+        for name, label, placeholder in fields:
+            inp = discord.ui.TextInput(
+                label=label,
+                placeholder=placeholder,
+                required=True,
+                max_length=100 if name == "source" else 32
+            )
+            self.add_item(inp)
+            self.inputs[name] = inp
 
     async def on_submit(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -223,18 +208,19 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
             color=0x2b2d31,
             timestamp=discord.utils.utcnow()
         )
-        embed.add_field(name="👤 Никнейм", value=self.nick.value, inline=True)
-        embed.add_field(name="🆔 Static ID", value=self.static_id.value, inline=True)
-        embed.add_field(name="🎂 Возраст (IRL)", value=self.age.value, inline=True)
-        embed.add_field(name="📛 Имя (IRL)", value=self.real_name.value, inline=True)
-        embed.add_field(name="⏳ Время в игре", value=self.playtime.value, inline=True)
-        embed.add_field(name="📢 Источник", value=self.source.value, inline=True)
+        data = {k: v.value for k, v in self.inputs.items()}
+        embed.add_field(name="👤 Никнейм", value=data["nick"], inline=True)
+        embed.add_field(name="🆔 Static ID", value=data["static_id"], inline=True)
+        embed.add_field(name="🎂 Возраст (IRL)", value=data["age"], inline=True)
+        embed.add_field(name="📛 Имя (IRL)", value=data["real_name"], inline=True)
+        embed.add_field(name="⏳ Время в игре", value=data["playtime"], inline=True)
+        embed.add_field(name="📢 Источник", value=data["source"], inline=True)
         embed.set_footer(text=f"Заявитель: {interaction.user} | ID: {interaction.user.id}")
 
         view = ApplicationControlView(applicant=interaction.user)
         msg = await self.target_channel.send(embed=embed, view=view)
         view.message = msg
-        await interaction.response.send_message("✅ Ваша заявка успешно отправлена! Ожидайте вызова на обзвон.", ephemeral=True)
+        await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
 
 class ApplicationControlView(discord.ui.View):
     def __init__(self, applicant: discord.Member):
@@ -243,7 +229,7 @@ class ApplicationControlView(discord.ui.View):
         self.message = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not has_any_role(interaction, MANAGE_APPLICATIONS_ROLES):
+        if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
             await interaction.response.send_message("❌ У вас нет прав для управления заявками.", ephemeral=True)
             return False
         return True
@@ -251,21 +237,20 @@ class ApplicationControlView(discord.ui.View):
     @discord.ui.button(label="📞 Вызвать на обзвон", style=discord.ButtonStyle.blurple, emoji="🔊")
     async def call_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await self.applicant.send("🔔 **Вы вызваны на обзвон в семью `ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ`!**\nПожалуйста, зайдите в любой открытый для вас голосовой канал.")
-            await interaction.response.send_message("✅ Участнику отправлено уведомление.", ephemeral=True)
+            await self.applicant.send("🔔 **Вы вызваны на обзвон в семью `ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ`!**\nЗайдите в любой открытый голосовой канал.")
+            await interaction.response.send_message("✅ Уведомление отправлено.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Не удалось отправить ЛС (сообщения закрыты).", ephemeral=True)
+            await interaction.response.send_message("❌ Не удалось отправить ЛС.", ephemeral=True)
 
     @discord.ui.button(label="✅ Одобрено", style=discord.ButtonStyle.green, emoji="🟢")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await self.applicant.send("🎉 **Поздравляем!** Вы приняты в семью **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!")
-            family_role = interaction.guild.get_role(FAMILY_ROLES["member"])
-            if family_role and family_role not in self.applicant.roles:
-                await self.applicant.add_roles(family_role)
+            await self.applicant.send("🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!")
+            role = interaction.guild.get_role(FAMILY_ROLES["member"])
+            if role and role not in self.applicant.roles:
+                await self.applicant.add_roles(role)
         except discord.Forbidden:
             pass
-
         embed = self.message.embeds[0]
         embed.color = discord.Color.green()
         embed.title = "✅ Заявка одобрена"
@@ -276,17 +261,16 @@ class ApplicationControlView(discord.ui.View):
 
     @discord.ui.button(label="❌ Отказано", style=discord.ButtonStyle.red, emoji="🔴")
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RejectReasonModal(applicant=self.applicant, message=self.message))
+        await interaction.response.send_modal(RejectReasonModal(self.applicant, self.message))
 
 class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
     def __init__(self, applicant: discord.Member, message: discord.Message):
         super().__init__()
         self.applicant = applicant
         self.message = message
-
         self.reason = discord.ui.TextInput(
-            label="Укажите причину отказа",
-            placeholder="Например: не подходит по возрасту или активности",
+            label="Причина отказа",
+            placeholder="Например: низкая активность",
             required=True,
             max_length=200,
             style=discord.TextStyle.paragraph
@@ -295,21 +279,18 @@ class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            await self.applicant.send(f"❌ Ваша заявка в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ** отклонена.\n**Причина:** {self.reason.value}")
+            await self.applicant.send(f"❌ Ваша заявка отклонена.\n**Причина:** {self.reason.value}")
         except discord.Forbidden:
             pass
-
         embed = self.message.embeds[0]
         embed.color = discord.Color.red()
         embed.title = "❌ Заявка отклонена"
         embed.add_field(name="💬 Причина", value=self.reason.value, inline=False)
-        for child in self.children:
-            child.disabled = True
         await self.message.edit(embed=embed, view=None)
         await interaction.response.send_message("✅ Отказ обработан.", ephemeral=True)
 
 # === КОМАНДА /состав_семьи ===
-@bot.tree.command(name="состав_семьи", description="Показать всех участников семьи по рангам")
+@bot.tree.command(name="состав_семьи", description="Показать состав семьи по рангам")
 async def family_members(interaction: discord.Interaction):
     if not any(role.id == FAMILY_ROLES["member"] for role in interaction.user.roles):
         await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
@@ -329,7 +310,7 @@ async def family_members(interaction: discord.Interaction):
         timestamp=discord.utils.utcnow()
     )
 
-    status_emojis = {
+    status_map = {
         discord.Status.online: "🟢 Онлайн",
         discord.Status.idle: "🌙 Отошёл",
         discord.Status.dnd: "⛔ Не беспокоить",
@@ -344,11 +325,8 @@ async def family_members(interaction: discord.Interaction):
         if not members:
             continue
         members.sort(key=lambda m: m.display_name.lower())
-        lines = []
-        for member in members:
-            status_text = status_emojis.get(member.status, "⚫ Не в сети")
-            lines.append(f"{status_text} — {member.mention} (`{member.display_name}`)")
-        embed.add_field(name=f"{rank_name}", value="\n".join(lines), inline=False)
+        lines = [f"{status_map.get(m.status, '⚫ Не в сети')} — {m.mention} (`{m.display_name}`)" for m in members]
+        embed.add_field(name=rank_name, value="\n".join(lines), inline=False)
 
     await interaction.response.send_message(embed=embed)
 
@@ -356,57 +334,43 @@ async def family_members(interaction: discord.Interaction):
 @bot.tree.command(name="состояние", description="Показать статистику пользователя по голосовым каналам")
 @app_commands.describe(user="Пользователь для проверки")
 async def user_state(interaction: discord.Interaction, user: discord.User):
-    if not has_any_role(interaction, MANAGE_COMMANDS_ROLES):
+    if not has_any_role(interaction.user, MANAGE_COMMANDS_ROLES):
         await interaction.response.send_message("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
         return
 
     member = interaction.guild.get_member(user.id)
     if not member:
-        await interaction.response.send_message("❌ Пользователь не находится на сервере.", ephemeral=True)
+        await interaction.response.send_message("❌ Пользователь не на сервере.", ephemeral=True)
         return
 
     sessions = get_user_sessions(user.id)
     if not sessions:
-        await interaction.response.send_message(f"🔇 У {user.mention} нет записей о пребывании в голосовых каналах.", ephemeral=True)
+        await interaction.response.send_message(f"🔇 У {user.mention} нет записей о пребывании в голосовых.", ephemeral=True)
         return
 
-    total_seconds = 0
+    total_seconds = sum(
+        (datetime.fromisoformat((s[2] or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")) -
+         datetime.fromisoformat(s[1].replace("Z", "+00:00"))).total_seconds()
+        for s in sessions
+    )
+
     details = []
-
-    for channel_id, start_str, end_str in sessions:
+    for channel_id, start_str, end_str in sessions[:10]:
         start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        end = datetime.fromisoformat((end_str or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00"))
         channel = interaction.guild.get_channel(channel_id)
-        channel_name = channel.name if channel else f"ID: {channel_id}"
+        name = channel.name if channel else f"ID:{channel_id}"
+        duration = int((end - start).total_seconds() // 60)
+        details.append(f"🎙️ **{name}** — {start.strftime('%d.%m %H:%M')} → {end.strftime('%H:%M')} ({duration} мин)")
 
-        if end_str is None:
-            duration = (datetime.now(timezone.utc) - start).total_seconds()
-            details.append(f"🎙️ **{channel_name}** — сейчас (с {start.strftime('%d.%m %H:%M')})")
-        else:
-            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            duration = (end - start).total_seconds()
-            details.append(
-                f"🎙️ **{channel_name}** — {start.strftime('%d.%m %H:%M')} → {end.strftime('%H:%M')} "
-                f"({int(duration // 60)} мин)"
-            )
-        total_seconds += duration
-
-    hours = int(total_seconds // 3600)
-    minutes = int((total_seconds % 3600) // 60)
-
+    hours, minutes = divmod(int(total_seconds // 60), 60)
     embed = discord.Embed(
         title=f"📊 Голосовая активность: {user.display_name}",
         description=f"**Общее время:** {hours} ч {minutes} мин",
         color=0xc41e3a
     )
-    embed.add_field(name="Последние сессии", value="\n".join(details[:10]), inline=False)
+    embed.add_field(name="Последние сессии", value="\n".join(details), inline=False)
     await interaction.response.send_message(embed=embed)
-
-# === СИНХРОНИЗАЦИЯ КОМАНД (только для владельца) ===
-@bot.command()
-@commands.is_owner()
-async def sync(ctx):
-    synced = await bot.tree.sync()
-    await ctx.send(f"✅ Синхронизировано {len(synced)} команд.")
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
