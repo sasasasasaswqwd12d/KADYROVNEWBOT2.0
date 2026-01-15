@@ -728,7 +728,7 @@ class ApplicationControlView(discord.ui.View):
     @discord.ui.button(label="✅ Одобрено", style=discord.ButtonStyle.green, emoji="🟢")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await self.applicant.send("🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!")
+            await self.applicant.send("🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅ𝑦ʀᴏᴠ ꜰᴀᴍǫ**!")
             role = interaction.guild.get_role(FAMILY_ROLES["member"])
             if role and role not in self.applicant.roles:
                 await self.applicant.add_roles(role)
@@ -1075,7 +1075,7 @@ class DiceModal(discord.ui.Modal, title="🎲 Кости"):
         balance = get_balance(inter.user.id)
         set_balance(inter.user.id, balance - amount)
 
-        if random.random() < 0.2:
+        if random.random() < 0.35:  # 35%
             prize = amount * 2
             set_balance(inter.user.id, balance - amount + prize)
             result = f"🎉 Вы выиграли **${prize:,}**!\nВаш бросок оказался удачным!"
@@ -1113,7 +1113,7 @@ class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
         spin = [random.choice(symbols) for _ in range(3)]
         spin_str = " | ".join(spin)
 
-        if random.random() < 0.2:
+        if random.random() < 0.35:  # 35%
             if spin[0] == spin[1] == spin[2]:
                 prize = amount * 3
                 set_balance(inter.user.id, balance - amount + prize)
@@ -1159,7 +1159,7 @@ class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
         balance = get_balance(inter.user.id)
         set_balance(inter.user.id, balance - amount)
 
-        if random.random() < 0.2:
+        if random.random() < 0.35:  # 35%
             prize = amount * 3
             set_balance(inter.user.id, balance - amount + prize)
             result = f"✨ Удача на вашей стороне! Вы умножили ставку на 3!\nВыигрыш: **${prize:,}**"
@@ -1198,11 +1198,19 @@ class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
         set_balance(inter.user.id, balance - amount)
         bot_number = random.randint(1, 36)
 
-        if number == bot_number:
-            prize = amount * 36
-            set_balance(inter.user.id, balance - amount + prize)
-            result = f"🎯 БИНГО! Вы угадали число **{bot_number}**!\nВы выиграли **${prize:,}**!"
-            color = 0x2ecc71
+        # Шанс 10% для рулетки
+        if random.random() < 0.1:  # 10%
+            if number == bot_number:
+                prize = amount * 36
+                set_balance(inter.user.id, balance - amount + prize)
+                result = f"🎯 БИНГО! Вы угадали число **{bot_number}**!\nВы выиграли **${prize:,}**!"
+                color = 0x2ecc71
+            else:
+                # Редкий случай: выигрыш без совпадения (для 10%)
+                prize = amount * 2
+                set_balance(inter.user.id, balance - amount + prize)
+                result = f"✨ Удача на вашей стороне! Вы выиграли **${prize:,}**!\nВыпало число: {bot_number}"
+                color = 0x2ecc71
         else:
             result = f"🔴 Выпало число **{bot_number}**. Вы проиграли **${amount:,}**."
             color = 0xe74c3c
