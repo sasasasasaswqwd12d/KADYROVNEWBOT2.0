@@ -5,7 +5,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 import asyncio
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # === НАСТРОЙКИ ===
 load_dotenv()
@@ -37,6 +37,9 @@ MANAGE_APPLICATIONS_ROLES = [
     FAMILY_ROLES["leader"]
 ]
 
+# === КАНАЛ ЛОГОВ ===
+LOG_CHANNEL_ID = 1461033301170192414
+
 # === НАСТРОЙКА БОТА ===
 intents = discord.Intents.default()
 intents.message_content = True
@@ -65,6 +68,14 @@ def init_db():
             reason TEXT NOT NULL,
             added_by INTEGER NOT NULL,
             added_at TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            submitted_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
         )
     ''')
     conn.commit()
@@ -139,6 +150,69 @@ def get_blacklist_reason(user_id: int) -> str:
     conn.close()
     return result[0] if result else "Не указана"
 
+# === ФУНКЦИИ ДЛЯ ЗАЯВОК ===
+def can_submit_application(user_id: int) -> bool:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    one_day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    cursor.execute(
+        "SELECT 1 FROM applications WHERE user_id = ? AND submitted_at > ?",
+        (user_id, one_day_ago)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result is None
+
+def record_application(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT INTO applications (user_id, submitted_at) VALUES (?, ?)",
+        (user_id, now)
+    )
+    conn.commit()
+    conn.close()
+
+def get_pending_applications_count() -> int:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM applications WHERE status = 'pending'")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+def get_last_application_time() -> str:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT submitted_at FROM applications ORDER BY submitted_at DESC LIMIT 1")
+    result = cursor.fetchone()
+    conn.close()
+    if not result:
+        return "Никогда"
+    dt = datetime.fromisoformat(result[0].replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    diff = now - dt
+    hours = int(diff.total_seconds() // 3600)
+    if hours < 1:
+        return "менее часа назад"
+    elif hours == 1:
+        return "1 час назад"
+    else:
+        return f"{hours} часов назад"
+
+# === ЛОГИРОВАНИЕ ===
+async def log_action(guild, action: str, details: str, color=0x2b2d31):
+    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        embed = discord.Embed(
+            title="📋 Аудит действий",
+            description=f"**Действие:** {action}\n{details}",
+            color=color,
+            timestamp=discord.utils.utcnow()
+        )
+        await log_channel.send(embed=embed)
+
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def has_any_role(member: discord.Member, role_ids: list) -> bool:
     if member.guild_permissions.administrator:
@@ -176,32 +250,42 @@ async def on_member_update(before, after):
     if not given_family_roles or not is_in_family_blacklist(after.id):
         return
 
+    # Снимаем роли с нарушителя
     await after.remove_roles(*given_family_roles)
+
+    # Находим, кто выдал роль (через audit log)
+    issuer = None
+    try:
+        async for entry in after.guild.audit_logs(action=discord.AuditLogAction.member_role_update, limit=10):
+            if entry.target.id == after.id and any(r.id in family_role_ids for r in getattr(entry.after, 'roles', [])):
+                issuer = entry.user
+                break
+    except Exception:
+        pass
+
+    # Если нашли выдавшего — снимаем роль и с него
+    issuer_roles_to_remove = []
+    if issuer and issuer != bot.user and issuer != after:
+        issuer_roles_to_remove = [r for r in issuer.roles if r.id in family_role_ids]
+        if issuer_roles_to_remove:
+            await issuer.remove_roles(*issuer_roles_to_remove)
+
+    # Логируем
     reason = get_blacklist_reason(after.id)
+    details = f"Участник: {after.mention} (ID: {after.id})\nПричина ЧС: {reason}"
+    if issuer:
+        details += f"\nВыдавший: {issuer.mention} (ID: {issuer.id})"
+        if issuer_roles_to_remove:
+            details += f"\nСняты роли с выдавшего: {', '.join(r.name for r in issuer_roles_to_remove)}"
 
-    embed = discord.Embed(
-        title="⚠️ Попытка выдать роль участнику из ЧС",
-        description=f"{after.mention} находится в чёрном списке семьи!",
-        color=0xff0000
-    )
-    embed.add_field(name="Причина ЧС", value=reason, inline=False)
-    embed.add_field(name="Роли сняты", value=", ".join(r.name for r in given_family_roles), inline=False)
-
-    mod_channel = after.guild.get_channel(1450181312769167500)
-    if mod_channel:
-        await mod_channel.send(embed=embed)
+    await log_action(after.guild, "Попытка выдать роль участнику из ЧС", details, color=0xff0000)
 
 async def change_status():
-    statuses = [
-        discord.Game("Играет"),
-        discord.Activity(type=discord.ActivityType.watching, name="Спит"),
-        discord.Activity(type=discord.ActivityType.listening, name="Есть"),
-        discord.Game("Тролится")
-    ]
     while True:
-        for status in statuses:
-            await bot.change_presence(activity=status)
-            await asyncio.sleep(30)
+        pending = get_pending_applications_count()
+        activity = discord.Game(f"Заявок: {pending}")
+        await bot.change_presence(activity=activity)
+        await asyncio.sleep(60)
 
 # === !sync ===
 @bot.command(name="sync")
@@ -240,6 +324,12 @@ async def blacklist_family(interaction: discord.Interaction, user_id: str, reaso
         await member.remove_roles(*roles_to_remove)
 
     add_to_family_blacklist(uid, reason, interaction.user.id)
+    await log_action(
+        interaction.guild,
+        "Выдача ЧС семьи",
+        f"Участник: {member.mention} (ID: {uid})\nПричина: {reason}\nВыдал: {interaction.user.mention}",
+        color=0xff0000
+    )
 
     embed = discord.Embed(
         title="🚫 Чёрный список семьи",
@@ -272,6 +362,13 @@ async def unblacklist_family(interaction: discord.Interaction, user_id: str):
         return
 
     remove_from_family_blacklist(uid)
+    await log_action(
+        interaction.guild,
+        "Снятие ЧС семьи",
+        f"Участник ID: {uid}\nСнял: {interaction.user.mention}",
+        color=0x00ff00
+    )
+
     member = interaction.guild.get_member(uid)
     mention = member.mention if member else f"ID: {uid}"
 
@@ -304,7 +401,6 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
         await interaction.response.send_message("❌ Канал не найден или недоступен.", ephemeral=True)
         return
 
-    # Проверка ЧС
     if is_in_family_blacklist(interaction.user.id):
         await interaction.response.send_message("❌ Вы не можете открывать набор, находясь в ЧС семьи.", ephemeral=True)
         return
@@ -329,11 +425,16 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
 
         @discord.ui.button(label="📄 Подать заявку", style=discord.ButtonStyle.green, emoji="📝")
         async def apply(self, inter: discord.Interaction, button: discord.ui.Button):
-            # Проверка ЧС при подаче заявки
             if is_in_family_blacklist(inter.id):
                 reason = get_blacklist_reason(inter.id)
                 await inter.response.send_message(
                     f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                    ephemeral=True
+                )
+                return
+            if not can_submit_application(inter.user.id):
+                await inter.response.send_message(
+                    "❌ Вы можете подавать заявку не чаще одного раза в день.",
                     ephemeral=True
                 )
                 return
@@ -385,7 +486,6 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
             self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Дублирующая проверка ЧС
         if is_in_family_blacklist(interaction.user.id):
             reason = get_blacklist_reason(interaction.user.id)
             await interaction.response.send_message(
@@ -393,6 +493,14 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
                 ephemeral=True
             )
             return
+        if not can_submit_application(interaction.user.id):
+            await interaction.response.send_message(
+                "❌ Вы можете подавать заявку не чаще одного раза в день.",
+                ephemeral=True
+            )
+            return
+
+        record_application(interaction.user.id)
 
         embed = discord.Embed(
             title="📄 Новая заявка на вступление",
@@ -407,13 +515,20 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
         embed.add_field(name="ℹ️ Детали", value=detail_value, inline=False)
         embed.set_footer(text=f"Заявитель: {interaction.user} | ID: {interaction.user.id}")
 
-        view = ApplicationControlView(applicant=interaction.user)
-        await self.target_channel.send(embed=embed, view=view)
+        view = ApplicationControlView(applicant=interaction.user, application_id=None)
+        msg = await self.target_channel.send(embed=embed, view=view)
+        # Обновляем статус заявки как pending
+        await log_action(
+            interaction.guild,
+            "Новая заявка",
+            f"Заявитель: {interaction.user.mention} (ID: {interaction.user.id})\nКанал: {self.target_channel.mention}",
+            color=0x2b2d31
+        )
         await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
 
 # === УПРАВЛЕНИЕ ЗАЯВКОЙ ===
 class ApplicationControlView(discord.ui.View):
-    def __init__(self, applicant: discord.Member):
+    def __init__(self, applicant: discord.Member, application_id=None):
         super().__init__(timeout=None)
         self.applicant = applicant
 
@@ -440,6 +555,7 @@ class ApplicationControlView(discord.ui.View):
                 await self.applicant.add_roles(role)
         except discord.Forbidden:
             pass
+
         embed = interaction.message.embeds[0]
         embed.color = discord.Color.green()
         embed.title = "✅ Заявка одобрена"
@@ -447,6 +563,13 @@ class ApplicationControlView(discord.ui.View):
             child.disabled = True
         await interaction.message.edit(embed=embed, view=self)
         await interaction.response.defer()
+
+        await log_action(
+            interaction.guild,
+            "Заявка одобрена",
+            f"Заявитель: {self.applicant.mention}\nОдобрил: {interaction.user.mention}",
+            color=0x00ff00
+        )
 
     @discord.ui.button(label="❌ Отказано", style=discord.ButtonStyle.red, emoji="🔴")
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -478,6 +601,34 @@ class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
         embed.add_field(name="💬 Причина", value=reason_value, inline=False)
         await self.message.edit(embed=embed, view=None)
         await interaction.response.send_message("✅ Отказ обработан.", ephemeral=True)
+
+        await log_action(
+            interaction.guild,
+            "Заявка отклонена",
+            f"Заявитель: {self.applicant.mention}\nПричина: {self.reason.value}\nОтклонил: {interaction.user.mention}",
+            color=0xff0000
+        )
+
+# === /статус_заявок ===
+@bot.tree.command(name="статус_заявок", description="Показать статус обработки заявок")
+async def application_status(interaction: discord.Interaction):
+    if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
+        await interaction.response.send_message("❌ У вас нет прав для просмотра статуса заявок.", ephemeral=True)
+        return
+
+    pending_count = get_pending_applications_count()
+    last_time = get_last_application_time()
+
+    embed = discord.Embed(
+        title="📊 Статус заявок",
+        color=0xc41e3a
+    )
+    embed.add_field(name="Всего нерассмотренных", value=str(pending_count), inline=True)
+    embed.add_field(name="Последняя заявка", value=last_time, inline=True)
+    embed.add_field(name="Обработка", value="Доступна для ролей [ʀᴇᴄʀᴜɪᴛ] и выше", inline=False)
+    embed.set_footer(text="Используйте /набор для открытия нового набора")
+
+    await interaction.response.send_message(embed=embed)
 
 # === /состав_семьи ===
 @bot.tree.command(name="состав_семьи", description="Показать состав семьи по рангам")
