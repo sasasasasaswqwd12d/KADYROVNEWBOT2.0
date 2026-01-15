@@ -31,6 +31,19 @@ FAMILY_ROLES = {
     "leader": LEADER_ROLE_ID
 }
 
+# === МАГАЗИН РОЛЕЙ ===
+SHOP_ROLES = {
+    1461403128330190982: 1_000_000,      # ЛУДИК
+    1461403410124374282: 2_500_000,      # АЛЬТУХА
+    1461403437756584126: 2_500_000,      # МЕРИКРИСТМАС
+    1461403169342099626: 10_000_000,     # ПОВЕЛИТЕЛЬ
+    1461403469175849137: 50_000_000,     # БИГ БОСС
+    1461403498053767219: 100_000_000,    # СУПЕР БОСС
+    1461403526302531686: 150_000_000,    # КОРОЛЬ ПЛАНЕТЫ
+    1461403355145572444: 500_000_000,    # ТОП 1 ФОРБС
+    1461403584360091651: 10_000_000_000   # РОЛЬ С ПРАВАМИ МОДЕРАТОРА
+}
+
 MANAGE_APPLICATIONS_ROLES = [
     FAMILY_ROLES["recruit"],
     FAMILY_ROLES["high_staff"],
@@ -117,7 +130,7 @@ def init_db():
 
 init_db()
 
-# === ФУНКЦИИ КАЗИНО ===
+# === ФУНКЦИИ ДЛЯ РАБОТЫ С БД ===
 def get_balance(user_id: int) -> int:
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
@@ -145,7 +158,6 @@ def get_top_casino() -> list:
     conn.close()
     return result
 
-# === ФУНКЦИИ WORK ===
 def can_work(user_id: int) -> bool:
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
@@ -165,7 +177,6 @@ def update_work_time(user_id: int):
     conn.commit()
     conn.close()
 
-# === ОСТАЛЬНЫЕ ФУНКЦИИ ===
 def add_voice_session(user_id: int, channel_id: int, start_time: datetime):
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
@@ -532,7 +543,7 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
         return
 
     target_channel = interaction.guild.get_channel(cid)
-    if not target_channel or not isinstance(target_channel, discord.Text(Channel)):
+    if not target_channel or not isinstance(target_channel, discord.TextChannel):
         await interaction.response.send_message("❌ Канал не найден или недоступен.", ephemeral=True)
         return
 
@@ -953,7 +964,7 @@ async def restore_backup(interaction: discord.Interaction, date: str):
     embed.add_field(name="Файл", value=f"`{date}.json`", inline=False)
     await interaction.response.send_message(embed=embed)
 
-# === КАЗИНО С КНОПКАМИ ПОСЛЕ КАЖДОЙ ИГРЫ ===
+# === КАЗИНО ===
 
 # === /баланс ===
 @bot.tree.command(name="баланс", description="Показать ваш баланс в казино")
@@ -986,7 +997,7 @@ def create_casino_view():
 
     return CasinoView()
 
-# === МОДАЛЬНЫЕ ОКНА С ПОСЛЕДУЮЩИМИ КНОПКАМИ ===
+# === МОДАЛЬНЫЕ ОКНА С НОВЫМИ КОЭФФИЦИЕНТАМИ ===
 class DiceModal(discord.ui.Modal, title="🎲 Кости"):
     def __init__(self, min_bet=1000):
         super().__init__()
@@ -1020,7 +1031,7 @@ class DiceModal(discord.ui.Modal, title="🎲 Кости"):
         bot_roll = random.randint(1, 6)
 
         if player_roll > bot_roll:
-            prize = amount * 10
+            prize = amount * 2  # x2
             set_balance(inter.user.id, balance - amount + prize)
             result = f"🎉 Вы выиграли **${prize:,}**!\nВаш бросок: {player_roll} | Бот: {bot_roll}"
             color = 0x2ecc71
@@ -1035,7 +1046,6 @@ class DiceModal(discord.ui.Modal, title="🎲 Кости"):
         new_balance = get_balance(inter.user.id)
         embed = discord.Embed(title="🎲 Кости", description=result, color=color)
         embed.set_footer(text=f"Ваш баланс: ${new_balance:,}")
-        # Отправляем результат + новые кнопки
         await inter.response.send_message(embed=embed, view=create_casino_view())
 
 class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
@@ -1072,17 +1082,12 @@ class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
         spin_str = " | ".join(spin)
 
         if spin[0] == spin[1] == spin[2]:
-            if spin[0] == "7️⃣":
-                prize = amount * 100
-            elif spin[0] == "💎":
-                prize = amount * 40
-            else:
-                prize = amount * 10
+            prize = amount * 3  # x3
             set_balance(inter.user.id, balance - amount + prize)
             result = f"🏆 Джекпот! Вы выиграли **${prize:,}**!\n{spin_str}"
             color = 0x2ecc71
         elif spin[0] == spin[1] or spin[1] == spin[2] or spin[0] == spin[2]:
-            prize = amount * 4
+            prize = amount * 2  # x2
             set_balance(inter.user.id, balance - amount + prize)
             result = f"👍 Два одинаковых! Вы выиграли **${prize:,}**!\n{spin_str}"
             color = 0x3498db
@@ -1125,9 +1130,9 @@ class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
 
         set_balance(inter.user.id, balance - amount)
         if random.random() < 0.5:
-            prize = amount * 2
+            prize = amount * 5  # x5
             set_balance(inter.user.id, balance - amount + prize)
-            result = f"✨ Удача на вашей стороне! Вы удвоили ставку!\nВыигрыш: **${prize:,}**"
+            result = f"✨ Удача на вашей стороне! Вы умножили ставку на 5!\nВыигрыш: **${prize:,}**"
             color = 0x2ecc71
         else:
             result = f"🌑 Вам не повезло. Ставка потеряна."
@@ -1216,6 +1221,96 @@ async def give_money(interaction: discord.Interaction, member: discord.Member, a
     )
     embed.add_field(name="Новый баланс", value=f"${new_balance:,}", inline=False)
     await interaction.response.send_message(embed=embed)
+
+# === /обнулить_баланс ===
+@bot.tree.command(name="обнулить_баланс", description="Обнулить баланс участника за нарушения")
+@app_commands.describe(member="Участник")
+async def reset_balance(interaction: discord.Interaction, member: discord.Member):
+    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    old_balance = get_balance(member.id)
+    set_balance(member.id, 0)
+
+    embed = discord.Embed(
+        title="⚖️ Баланс обнулён",
+        description=f"Заместитель {interaction.user.mention} обнулил баланс участника {member.mention} за нарушения.",
+        color=0xff0000
+    )
+    embed.add_field(name="Предыдущий баланс", value=f"${old_balance:,}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# === /магазин ===
+@bot.tree.command(name="магазин", description="Купить роль за доллары")
+async def shop_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛒 Магазин ролей ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ",
+        description="Выберите роль для покупки:",
+        color=0x9b59b6
+    )
+
+    role_names = {
+        1461403128330190982: "ЛУДИК",
+        1461403410124374282: "АЛЬТУХА",
+        1461403437756584126: "МЕРИКРИСТМАС",
+        1461403169342099626: "ПОВЕЛИТЕЛЬ",
+        1461403469175849137: "БИГ БОСС",
+        1461403498053767219: "СУПЕР БОСС",
+        1461403526302531686: "КОРОЛЬ ПЛАНЕТЫ",
+        1461403355145572444: "ТОП 1 ФОРБС",
+        1461403584360091651: "РОЛЬ С ПРАВАМИ МОДЕРАТОРА"
+    }
+
+    for role_id, price in SHOP_ROLES.items():
+        role_name = role_names.get(role_id, f"Роль {role_id}")
+        embed.add_field(
+            name=f"{role_name}",
+            value=f"Цена: **${price:,}**",
+            inline=False
+        )
+
+    class ShopView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=120)
+
+        @discord.ui.select(
+            placeholder="Выберите роль для покупки",
+            options=[
+                discord.SelectOption(label=role_names[rid], value=str(rid), description=f"${SHOP_ROLES[rid]:,}")
+                for rid in SHOP_ROLES.keys()
+            ]
+        )
+        async def select_role(self, inter: discord.Interaction, select: discord.ui.Select):
+            role_id = int(select.values[0])
+            price = SHOP_ROLES[role_id]
+            balance = get_balance(inter.user.id)
+
+            if balance < price:
+                await inter.response.send_message("❌ У вас недостаточно денег!", ephemeral=True)
+                return
+
+            role = inter.guild.get_role(role_id)
+            if not role:
+                await inter.response.send_message("❌ Роль не найдена на сервере.", ephemeral=True)
+                return
+
+            if role in inter.user.roles:
+                await inter.response.send_message("❌ У вас уже есть эта роль.", ephemeral=True)
+                return
+
+            set_balance(inter.user.id, balance - price)
+            await inter.user.add_roles(role)
+
+            embed = discord.Embed(
+                title="✅ Покупка совершена!",
+                description=f"Вы приобрели роль **{role.name}** за **${price:,}**.",
+                color=0x2ecc71
+            )
+            embed.set_footer(text=f"Ваш новый баланс: ${get_balance(inter.user.id):,}")
+            await inter.response.send_message(embed=embed)
+
+    await interaction.response.send_message(embed=embed, view=ShopView())
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
