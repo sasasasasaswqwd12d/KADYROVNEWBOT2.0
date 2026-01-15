@@ -46,10 +46,11 @@ SHOP_ROLES = {
 
 # === ТОВАРЫ (вирты) ===
 VIRT_ITEMS = {
-    "10.000.000.000": {"name": "10.000.000.000 ВИРТОВ на trace", "price": 100_000_000},
-    "50.000.000.000": {"name": "50.000.000.000 ВИРТОВ на trace", "price": 200_000_000},
-    "100.000.000.000": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 500_000_000},
-    "150.000.000.000": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 10_000_000_000}
+    "10B": {"name": "10.000.000.000 ВИРТОВ на trace", "price": 10_000_000},
+    "50B": {"name": "50.000.000.000 ВИРТОВ на trace", "price": 20_000_000},
+    "100B_1": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 50_000_000},
+    "100B_2": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 50_000_000},
+    "150B": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 100_000_000}
 }
 
 NOTIFY_CHANNEL_ID = 1461410158109397110
@@ -134,6 +135,13 @@ def init_db():
         )
     ''')
 
+    # Бан казино
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS casino_ban (
+            user_id INTEGER PRIMARY KEY
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -159,13 +167,36 @@ def set_balance(user_id: int, amount: int):
     conn.commit()
     conn.close()
 
-def get_top_casino() -> list:
+def is_casino_banned(user_id: int) -> bool:
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, balance FROM casino_balance ORDER BY balance DESC LIMIT 10")
-    result = cursor.fetchall()
+    cursor.execute("SELECT 1 FROM casino_ban WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
     conn.close()
-    return result
+    return result is not None
+
+def ban_from_casino(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO casino_ban (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+def unban_from_casino(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM casino_ban WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_all_family_members(guild: discord.Guild) -> list:
+    members = []
+    for member in guild.members:
+        if member.bot:
+            continue
+        if any(role.id in FAMILY_ROLES.values() for role in member.roles):
+            members.append(member)
+    return members
 
 def can_work(user_id: int) -> bool:
     conn = sqlite3.connect("voice_data.db")
@@ -176,7 +207,7 @@ def can_work(user_id: int) -> bool:
     if not result:
         return True
     last_work = datetime.fromisoformat(result[0].replace("Z", "+00:00"))
-    return datetime.now(timezone.utc) - last_work > timedelta(hours=2)
+    return datetime.now(timezone.utc) - last_work > timedelta(minutes=5)
 
 def update_work_time(user_id: int):
     conn = sqlite3.connect("voice_data.db")
@@ -978,6 +1009,9 @@ async def restore_backup(interaction: discord.Interaction, date: str):
 # === /баланс ===
 @bot.tree.command(name="баланс", description="Показать ваш баланс в казино")
 async def balance_command(interaction: discord.Interaction):
+    if is_casino_banned(interaction.user.id):
+        await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+        return
     balance = get_balance(interaction.user.id)
     embed = discord.Embed(
         title="💰 Ваш баланс",
@@ -993,6 +1027,9 @@ def create_casino_view(user_id: int):
             super().__init__(timeout=300)
 
         async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if is_casino_banned(interaction.user.id):
+                await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+                return False
             if interaction.user.id != user_id:
                 await interaction.response.send_message("❌ Эта игра не для вас.", ephemeral=True)
                 return False
@@ -1016,7 +1053,7 @@ def create_casino_view(user_id: int):
 
     return CasinoView()
 
-# === МОДАЛЬНЫЕ ОКНА ===
+# === МОДАЛЬНЫЕ ОКНА С НОВЫМИ ШАНСАМИ ===
 class DiceModal(discord.ui.Modal, title="🎲 Кости"):
     def __init__(self, min_bet=1000, user_id=None):
         super().__init__()
@@ -1037,20 +1074,14 @@ class DiceModal(discord.ui.Modal, title="🎲 Кости"):
 
         balance = get_balance(inter.user.id)
         set_balance(inter.user.id, balance - amount)
-        player_roll = random.randint(1, 6)
-        bot_roll = random.randint(1, 6)
 
-        if player_roll > bot_roll:
+        if random.random() < 0.2:
             prize = amount * 2
             set_balance(inter.user.id, balance - amount + prize)
-            result = f"🎉 Вы выиграли **${prize:,}**!\nВаш бросок: {player_roll} | Бот: {bot_roll}"
+            result = f"🎉 Вы выиграли **${prize:,}**!\nВаш бросок оказался удачным!"
             color = 0x2ecc71
-        elif player_roll == bot_roll:
-            set_balance(inter.user.id, balance)
-            result = f"🤝 Ничья! Ставка возвращена.\nВаш бросок: {player_roll} | Бот: {bot_roll}"
-            color = 0xf39c12
         else:
-            result = f"💀 Вы проиграли **${amount:,}**.\nВаш бросок: {player_roll} | Бот: {bot_roll}"
+            result = f"💀 Вы проиграли **${amount:,}**.\nПовезёт в следующий раз!"
             color = 0xe74c3c
 
         new_balance = get_balance(inter.user.id)
@@ -1082,16 +1113,22 @@ class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
         spin = [random.choice(symbols) for _ in range(3)]
         spin_str = " | ".join(spin)
 
-        if spin[0] == spin[1] == spin[2]:
-            prize = amount * 3
-            set_balance(inter.user.id, balance - amount + prize)
-            result = f"🏆 Джекпот! Вы выиграли **${prize:,}**!\n{spin_str}"
-            color = 0x2ecc71
-        elif spin[0] == spin[1] or spin[1] == spin[2] or spin[0] == spin[2]:
-            prize = amount * 2
-            set_balance(inter.user.id, balance - amount + prize)
-            result = f"👍 Два одинаковых! Вы выиграли **${prize:,}**!\n{spin_str}"
-            color = 0x3498db
+        if random.random() < 0.2:
+            if spin[0] == spin[1] == spin[2]:
+                prize = amount * 3
+                set_balance(inter.user.id, balance - amount + prize)
+                result = f"🏆 Джекпот! Вы выиграли **${prize:,}**!\n{spin_str}"
+                color = 0x2ecc71
+            elif spin[0] == spin[1] or spin[1] == spin[2] or spin[0] == spin[2]:
+                prize = amount * 2
+                set_balance(inter.user.id, balance - amount + prize)
+                result = f"👍 Два одинаковых! Вы выиграли **${prize:,}**!\n{spin_str}"
+                color = 0x3498db
+            else:
+                prize = amount * 2
+                set_balance(inter.user.id, balance - amount + prize)
+                result = f"✨ Удача на вашей стороне! Вы выиграли **${prize:,}**!\n{spin_str}"
+                color = 0x2ecc71
         else:
             result = f"💔 Повезёт в следующий раз!\n{spin_str}"
             color = 0xe74c3c
@@ -1121,10 +1158,11 @@ class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
 
         balance = get_balance(inter.user.id)
         set_balance(inter.user.id, balance - amount)
-        if random.random() < 0.5:
-            prize = amount * 5
+
+        if random.random() < 0.2:
+            prize = amount * 3
             set_balance(inter.user.id, balance - amount + prize)
-            result = f"✨ Удача на вашей стороне! Вы умножили ставку на 5!\nВыигрыш: **${prize:,}**"
+            result = f"✨ Удача на вашей стороне! Вы умножили ставку на 3!\nВыигрыш: **${prize:,}**"
             color = 0x2ecc71
         else:
             result = f"🌑 Вам не повезло. Ставка потеряна."
@@ -1177,10 +1215,13 @@ class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
 # === /казино ===
 @bot.tree.command(name="казино", description="Играть в казино")
 async def casino_command(interaction: discord.Interaction):
+    if is_casino_banned(interaction.user.id):
+        await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+        return
     balance = get_balance(interaction.user.id)
     embed = discord.Embed(
         title="🎰 Казино ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ",
-        description=f"Ваш баланс: **${balance:,}**\nВыберите игру:",
+        description=f"{interaction.user.mention}, ваш баланс: **${balance:,}**\nВыберите игру:",
         color=0x9b59b6
     )
     await interaction.response.send_message(embed=embed, view=create_casino_view(interaction.user.id))
@@ -1188,7 +1229,12 @@ async def casino_command(interaction: discord.Interaction):
 # === /топ_казино ===
 @bot.tree.command(name="топ_казино", description="Топ-10 богачей казино")
 async def top_casino(interaction: discord.Interaction):
-    top_players = get_top_casino()
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, balance FROM casino_balance ORDER BY balance DESC LIMIT 10")
+    top_players = cursor.fetchall()
+    conn.close()
+
     if not top_players:
         await interaction.response.send_message("Никто ещё не играл в казино.", ephemeral=True)
         return
@@ -1214,7 +1260,7 @@ async def work_command(interaction: discord.Interaction):
         return
 
     if not can_work(interaction.user.id):
-        await interaction.response.send_message("⏳ Вы можете работать раз в 2 часа.", ephemeral=True)
+        await interaction.response.send_message("⏳ Вы можете работать раз в 5 минут.", ephemeral=True)
         return
 
     current = get_balance(interaction.user.id)
@@ -1272,9 +1318,85 @@ async def reset_balance(interaction: discord.Interaction, member: discord.Member
     embed.add_field(name="Предыдущий баланс", value=f"${old_balance:,}", inline=False)
     await interaction.response.send_message(embed=embed)
 
+# === /обнулить_всех ===
+@bot.tree.command(name="обнулить_всех", description="Обнулить балансы всех участников семьи")
+async def reset_all_balances(interaction: discord.Interaction):
+    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    members = get_all_family_members(interaction.guild)
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    for member in members:
+        cursor.execute("INSERT OR REPLACE INTO casino_balance (user_id, balance) VALUES (?, 10000)", (member.id,))
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(
+        title="🔄 Все балансы сброшены!",
+        description=f"Заместитель {interaction.user.mention} сбросил балансы всех участников семьи до **$10,000**.",
+        color=0xff0000
+    )
+    embed.add_field(name="Затронуто участников", value=str(len(members)), inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# === /выдать_всем_деньги ===
+@bot.tree.command(name="выдать_всем_деньги", description="Выдать деньги всем участникам семьи")
+@app_commands.describe(amount="Сумма в долларах")
+async def give_money_to_all(interaction: discord.Interaction, amount: int):
+    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ Сумма должна быть положительной.", ephemeral=True)
+        return
+
+    members = get_all_family_members(interaction.guild)
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    for member in members:
+        cursor.execute("SELECT balance FROM casino_balance WHERE user_id = ?", (member.id,))
+        result = cursor.fetchone()
+        current = result[0] if result else 10000
+        cursor.execute("INSERT OR REPLACE INTO casino_balance (user_id, balance) VALUES (?, ?)", (member.id, current + amount))
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(
+        title="💸 Массовая выдача денег",
+        description=f"Заместитель {interaction.user.mention} выдал **${amount:,}** каждому участнику семьи.",
+        color=0x2ecc71
+    )
+    embed.add_field(name="Получателей", value=str(len(members)), inline=True)
+    embed.add_field(name="Общая сумма", value=f"${amount * len(members):,}", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+# === /бан_казино ===
+@bot.tree.command(name="бан_казино", description="Забанить участника в казино")
+@app_commands.describe(member="Участник")
+async def ban_casino(interaction: discord.Interaction, member: discord.Member):
+    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    if is_casino_banned(member.id):
+        await interaction.response.send_message("❌ Этот участник уже забанен в казино.", ephemeral=True)
+        return
+
+    ban_from_casino(member.id)
+    embed = discord.Embed(
+        title="🚫 Бан в казино",
+        description=f"Заместитель {interaction.user.mention} забанил {member.mention} в казино.",
+        color=0xff0000
+    )
+    await interaction.response.send_message(embed=embed)
+
 # === /магазин ===
 @bot.tree.command(name="магазин", description="Купить роль или вирты")
 async def shop_command(interaction: discord.Interaction):
+    balance = get_balance(interaction.user.id)
     embed = discord.Embed(title="🛒 Магазин", description="Выберите товар:", color=0x9b59b6)
 
     role_names = {
