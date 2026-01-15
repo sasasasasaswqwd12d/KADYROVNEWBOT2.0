@@ -5,6 +5,7 @@ from discord import app_commands
 from dotenv import load_dotenv
 import asyncio
 import sqlite3
+import json
 from datetime import datetime, timezone, timedelta
 
 # === НАСТРОЙКИ ===
@@ -13,16 +14,15 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("❌ Файл .env должен содержать DISCORD_TOKEN=ваш_токен")
 
-# ⚠️ ЗАМЕНИТЕ НА СВОЙ ID ВЛАДЕЛЬЦА БОТА
-OWNER_ID = 1425864152563585158  # ← ОБЯЗАТЕЛЬНО ИЗМЕНИТЬ!
+OWNER_ID = 1425864152563585158  # ← УКАЗАН ВАШ ID
 
 # === ID РОЛЕЙ ===
 LEADER_ROLE_ID = 605829120974258203
 DEPUTY_LEADER_ROLE_ID = 1220118511549026364
-ADMIN_ROLE_ID = 1460688847267565744
+FAMILY_MEMBER_ROLE_ID = 1460692962139836487
 
 FAMILY_ROLES = {
-    "member": 1460692962139836487,
+    "member": FAMILY_MEMBER_ROLE_ID,
     "main_staff": 1460692954812387472,
     "recruit": 1460692951494688967,
     "high_staff": 1460692948458143848,
@@ -37,8 +37,10 @@ MANAGE_APPLICATIONS_ROLES = [
     FAMILY_ROLES["leader"]
 ]
 
-# === КАНАЛ ЛОГОВ ===
 LOG_CHANNEL_ID = 1461033301170192414
+
+# === ПОДГОТОВКА ПАПКИ BACKUPS ===
+os.makedirs("backups", exist_ok=True)
 
 # === НАСТРОЙКА БОТА ===
 intents = discord.Intents.default()
@@ -53,6 +55,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 def init_db():
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS voice_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +65,7 @@ def init_db():
             end_time TEXT
         )
     ''')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS family_blacklist (
             user_id INTEGER PRIMARY KEY,
@@ -70,6 +74,7 @@ def init_db():
             added_at TEXT NOT NULL
         )
     ''')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +83,15 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'pending'
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS profiles (
+            user_id INTEGER PRIMARY KEY,
+            nickname TEXT,
+            static_id TEXT
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -201,6 +215,25 @@ def get_last_application_time() -> str:
     else:
         return f"{hours} часов назад"
 
+# === ФУНКЦИИ ПРОФИЛЕЙ ===
+def save_profile(user_id: int, nickname: str, static_id: str):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO profiles (user_id, nickname, static_id) VALUES (?, ?, ?)",
+        (user_id, nickname, static_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_profile(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT nickname, static_id FROM profiles WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
+
 # === ЛОГИРОВАНИЕ ===
 async def log_action(guild, action: str, details: str, color=0x2b2d31):
     log_channel = guild.get_channel(LOG_CHANNEL_ID)
@@ -225,6 +258,7 @@ async def on_ready():
     print(f'✅ Бот {bot.user} запущен!')
     print(f'💡 Отправьте "!sync" для синхронизации слэш-команд.')
     bot.loop.create_task(change_status())
+    bot.loop.create_task(backup_task())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -250,10 +284,8 @@ async def on_member_update(before, after):
     if not given_family_roles or not is_in_family_blacklist(after.id):
         return
 
-    # Снимаем роли с нарушителя
     await after.remove_roles(*given_family_roles)
 
-    # Находим, кто выдал роль (через audit log)
     issuer = None
     try:
         async for entry in after.guild.audit_logs(action=discord.AuditLogAction.member_role_update, limit=10):
@@ -263,14 +295,12 @@ async def on_member_update(before, after):
     except Exception:
         pass
 
-    # Если нашли выдавшего — снимаем роль и с него
     issuer_roles_to_remove = []
     if issuer and issuer != bot.user and issuer != after:
         issuer_roles_to_remove = [r for r in issuer.roles if r.id in family_role_ids]
         if issuer_roles_to_remove:
             await issuer.remove_roles(*issuer_roles_to_remove)
 
-    # Логируем
     reason = get_blacklist_reason(after.id)
     details = f"Участник: {after.mention} (ID: {after.id})\nПричина ЧС: {reason}"
     if issuer:
@@ -286,6 +316,48 @@ async def change_status():
         activity = discord.Game(f"Заявок: {pending}")
         await bot.change_presence(activity=activity)
         await asyncio.sleep(60)
+
+async def backup_task():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        for guild in bot.guilds:
+            backup_guild(guild)
+        await asyncio.sleep(3600)
+
+def backup_guild(guild: discord.Guild):
+    data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "guild_id": guild.id,
+        "guild_name": guild.name,
+        "members": []
+    }
+
+    for member in guild.members:
+        if member.bot:
+            continue
+        roles = [role.id for role in member.roles if role.id in FAMILY_ROLES.values()]
+        if roles:
+            data["members"].append({
+                "user_id": member.id,
+                "name": member.name,
+                "display_name": member.display_name,
+                "roles": roles,
+                "joined_at": member.joined_at.isoformat() if member.joined_at else None
+            })
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    filename = f"backups/backup_{timestamp}.json"
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    cutoff = datetime.now() - timedelta(days=30)
+    for file in os.listdir("backups"):
+        try:
+            file_time = datetime.strptime(file.replace("backup_", "").replace(".json", ""), "%Y-%m-%d_%H-%M")
+            if file_time < cutoff:
+                os.remove(f"backups/{file}")
+        except:
+            pass
 
 # === !sync ===
 @bot.command(name="sync")
@@ -444,7 +516,7 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
     await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
     await interaction.followup.send(embed=embed, view=ApplyButton(), ephemeral=False)
 
-# === МОДАЛЬНОЕ ОКНО ===
+# === МОДАЛЬНОЕ ОКНО ЗАЯВКИ ===
 class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ"):
     def __init__(self, target_channel: discord.TextChannel):
         super().__init__()
@@ -515,20 +587,13 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
         embed.add_field(name="ℹ️ Детали", value=detail_value, inline=False)
         embed.set_footer(text=f"Заявитель: {interaction.user} | ID: {interaction.user.id}")
 
-        view = ApplicationControlView(applicant=interaction.user, application_id=None)
-        msg = await self.target_channel.send(embed=embed, view=view)
-        # Обновляем статус заявки как pending
-        await log_action(
-            interaction.guild,
-            "Новая заявка",
-            f"Заявитель: {interaction.user.mention} (ID: {interaction.user.id})\nКанал: {self.target_channel.mention}",
-            color=0x2b2d31
-        )
+        view = ApplicationControlView(applicant=interaction.user)
+        await self.target_channel.send(embed=embed, view=view)
         await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
 
 # === УПРАВЛЕНИЕ ЗАЯВКОЙ ===
 class ApplicationControlView(discord.ui.View):
-    def __init__(self, applicant: discord.Member, application_id=None):
+    def __init__(self, applicant: discord.Member):
         super().__init__(timeout=None)
         self.applicant = applicant
 
@@ -692,7 +757,7 @@ async def family_members(interaction: discord.Interaction):
 @bot.tree.command(name="состояние", description="Показать статистику пользователя по голосовым каналам")
 @app_commands.describe(user="Пользователь для проверки")
 async def user_state(interaction: discord.Interaction, user: discord.User):
-    allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"], ADMIN_ROLE_ID]
+    allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"], 1460688847267565744]
     if not has_any_role(interaction.user, allowed_roles):
         await interaction.response.send_message("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
         return
@@ -725,6 +790,104 @@ async def user_state(interaction: discord.Interaction, user: discord.User):
         color=0xc41e3a
     )
     embed.add_field(name="Последние сессии", value="\n".join(details) or "Нет данных", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# === НОВАЯ КОМАНДА: /профиль ===
+@bot.tree.command(name="профиль", description="Заполнить свой профиль семьи")
+async def profile_command(interaction: discord.Interaction):
+    if FAMILY_MEMBER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        return
+
+    class ProfileModal(discord.ui.Modal, title="Ваш профиль семьи"):
+        def __init__(self):
+            super().__init__()
+            self.nick = discord.ui.TextInput(
+                label="Ваш никнейм",
+                placeholder="Пример: Nick Name",
+                required=True,
+                max_length=32
+            )
+            self.static_id = discord.ui.TextInput(
+                label="Ваш Static ID",
+                placeholder="Пример: 66666",
+                required=True,
+                max_length=10
+            )
+            self.add_item(self.nick)
+            self.add_item(self.static_id)
+
+        async def on_submit(self, inter: discord.Interaction):
+            save_profile(inter.user.id, self.nick.value, self.static_id.value)
+            await inter.response.send_message("✅ Ваш профиль успешно сохранён!", ephemeral=True)
+
+    await interaction.response.send_modal(ProfileModal())
+
+# === НОВАЯ КОМАНДА: /посмотреть_профиль ===
+@bot.tree.command(name="посмотреть_профиль", description="Просмотреть профиль участника")
+@app_commands.describe(member="Участник для просмотра")
+async def view_profile(interaction: discord.Interaction, member: discord.Member):
+    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    profile = get_profile(member.id)
+    embed = discord.Embed(
+        title=f"📄 Профиль: {member.display_name}",
+        color=0xc41e3a
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="👤 Упоминание", value=member.mention, inline=True)
+    embed.add_field(name="🆔 ID", value=str(member.id), inline=True)
+
+    if profile:
+        embed.add_field(name="📛 Никнейм", value=profile[0], inline=False)
+        embed.add_field(name="🎮 Static ID", value=profile[1], inline=False)
+    else:
+        embed.description = "❌ Профиль не заполнен."
+
+    await interaction.response.send_message(embed=embed)
+
+# === НОВАЯ КОМАНДА: /восстановить_состав ===
+@bot.tree.command(name="восстановить_состав", description="Восстановить состав семьи из бэкапа")
+@app_commands.describe(date="Дата бэкапа (формат: YYYY-MM-DD_HH-MM)")
+async def restore_backup(interaction: discord.Interaction, date: str):
+    if LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Только Лидер может восстанавливать состав.", ephemeral=True)
+        return
+
+    filepath = f"backups/backup_{date}.json"
+    if not os.path.exists(filepath):
+        files = "\n".join(f"`{f.replace('backup_', '').replace('.json', '')}`" for f in sorted(os.listdir("backups")))
+        await interaction.response.send_message(
+            f"❌ Бэкап не найден.\nДоступные даты:\n{files}",
+            ephemeral=True
+        )
+        return
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    restored = 0
+    for member_data in data["members"]:
+        member = interaction.guild.get_member(member_data["user_id"])
+        if not member:
+            continue
+        roles_to_add = []
+        for role_id in member_data["roles"]:
+            role = interaction.guild.get_role(role_id)
+            if role and role not in member.roles:
+                roles_to_add.append(role)
+        if roles_to_add:
+            await member.add_roles(*roles_to_add)
+            restored += 1
+
+    embed = discord.Embed(
+        title="✅ Восстановление завершено",
+        description=f"Восстановлено ролей для {restored} участников.",
+        color=0x00ff00
+    )
+    embed.add_field(name="Файл", value=f"`{date}.json`", inline=False)
     await interaction.response.send_message(embed=embed)
 
 # === ЗАПУСК ===
