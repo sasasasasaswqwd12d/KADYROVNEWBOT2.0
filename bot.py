@@ -46,7 +46,7 @@ intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === БАЗА ДАННЫХ ===
+# === ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
@@ -59,11 +59,20 @@ def init_db():
             end_time TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS family_blacklist (
+            user_id INTEGER PRIMARY KEY,
+            reason TEXT NOT NULL,
+            added_by INTEGER NOT NULL,
+            added_at TEXT NOT NULL
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
+# === ФУНКЦИИ ДЛЯ ГОЛОСОВЫХ СЕССИЙ ===
 def add_voice_session(user_id: int, channel_id: int, start_time: datetime):
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
@@ -95,6 +104,42 @@ def get_user_sessions(user_id: int):
     conn.close()
     return rows
 
+# === ФУНКЦИИ ДЛЯ ЧЁРНОГО СПИСКА ===
+def add_to_family_blacklist(user_id: int, reason: str, added_by: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT OR REPLACE INTO family_blacklist (user_id, reason, added_by, added_at) VALUES (?, ?, ?, ?)",
+        (user_id, reason, added_by, now)
+    )
+    conn.commit()
+    conn.close()
+
+def remove_from_family_blacklist(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM family_blacklist WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def is_in_family_blacklist(user_id: int) -> bool:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM family_blacklist WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+def get_blacklist_reason(user_id: int) -> str:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT reason FROM family_blacklist WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else "Не указана"
+
+# === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def has_any_role(member: discord.Member, role_ids: list) -> bool:
     if member.guild_permissions.administrator:
         return True
@@ -120,6 +165,32 @@ async def on_voice_state_update(member, before, after):
     elif not before.channel and after.channel:
         add_voice_session(member.id, after.channel.id, now)
 
+@bot.event
+async def on_member_update(before, after):
+    added_roles = set(after.roles) - set(before.roles)
+    if not added_roles:
+        return
+
+    family_role_ids = set(FAMILY_ROLES.values())
+    given_family_roles = [r for r in added_roles if r.id in family_role_ids]
+    if not given_family_roles or not is_in_family_blacklist(after.id):
+        return
+
+    await after.remove_roles(*given_family_roles)
+    reason = get_blacklist_reason(after.id)
+
+    embed = discord.Embed(
+        title="⚠️ Попытка выдать роль участнику из ЧС",
+        description=f"{after.mention} находится в чёрном списке семьи!",
+        color=0xff0000
+    )
+    embed.add_field(name="Причина ЧС", value=reason, inline=False)
+    embed.add_field(name="Роли сняты", value=", ".join(r.name for r in given_family_roles), inline=False)
+
+    mod_channel = after.guild.get_channel(1450181312769167500)
+    if mod_channel:
+        await mod_channel.send(embed=embed)
+
 async def change_status():
     statuses = [
         discord.Game("Играет"),
@@ -144,7 +215,76 @@ async def sync_command(ctx):
     except Exception as e:
         await ctx.send(f"❌ Ошибка: {e}")
 
-# === /набор (ИСПРАВЛЕНО!) ===
+# === /чс_семьи ===
+@bot.tree.command(name="чс_семьи", description="Выдать чёрный список семьи участнику")
+@app_commands.describe(user_id="ID пользователя", reason="Причина ЧС")
+async def blacklist_family(interaction: discord.Interaction, user_id: str, reason: str):
+    if FAMILY_ROLES["deputy_leader"] not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message("❌ ID должен быть числом.", ephemeral=True)
+        return
+
+    member = interaction.guild.get_member(uid)
+    if not member:
+        await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
+        return
+
+    roles_to_remove = [interaction.guild.get_role(rid) for rid in FAMILY_ROLES.values()]
+    roles_to_remove = [r for r in roles_to_remove if r and r in member.roles]
+    if roles_to_remove:
+        await member.remove_roles(*roles_to_remove)
+
+    add_to_family_blacklist(uid, reason, interaction.user.id)
+
+    embed = discord.Embed(
+        title="🚫 Чёрный список семьи",
+        description=f"Пользователь {member.mention} добавлен в ЧС семьи.",
+        color=0xff0000
+    )
+    embed.add_field(name="Причина", value=reason, inline=False)
+    if roles_to_remove:
+        embed.add_field(name="Снятые роли", value=", ".join(r.name for r in roles_to_remove), inline=False)
+    embed.set_footer(text=f"Выдал: {interaction.user}")
+
+    await interaction.response.send_message(embed=embed)
+
+# === /снять_чс ===
+@bot.tree.command(name="снять_чс", description="Снять чёрный список семьи с участника")
+@app_commands.describe(user_id="ID пользователя")
+async def unblacklist_family(interaction: discord.Interaction, user_id: str):
+    if FAMILY_ROLES["deputy_leader"] not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    try:
+        uid = int(user_id)
+    except ValueError:
+        await interaction.response.send_message("❌ ID должен быть числом.", ephemeral=True)
+        return
+
+    if not is_in_family_blacklist(uid):
+        await interaction.response.send_message("❌ Пользователь не в чёрном списке семьи.", ephemeral=True)
+        return
+
+    remove_from_family_blacklist(uid)
+    member = interaction.guild.get_member(uid)
+    mention = member.mention if member else f"ID: {uid}"
+
+    embed = discord.Embed(
+        title="✅ ЧС семьи снят",
+        description=f"С пользователя {mention} снят чёрный список семьи.",
+        color=0x00ff00
+    )
+    embed.set_footer(text=f"Снял: {interaction.user}")
+
+    await interaction.response.send_message(embed=embed)
+
+# === /набор ===
 @bot.tree.command(name="набор", description="Открыть набор в указанном канале")
 @app_commands.describe(channel_id="ID канала, куда будут приходить заявки")
 async def recruitment(interaction: discord.Interaction, channel_id: str):
@@ -162,6 +302,11 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
     target_channel = interaction.guild.get_channel(cid)
     if not target_channel or not isinstance(target_channel, discord.TextChannel):
         await interaction.response.send_message("❌ Канал не найден или недоступен.", ephemeral=True)
+        return
+
+    # Проверка ЧС
+    if is_in_family_blacklist(interaction.user.id):
+        await interaction.response.send_message("❌ Вы не можете открывать набор, находясь в ЧС семьи.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -184,10 +329,17 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
 
         @discord.ui.button(label="📄 Подать заявку", style=discord.ButtonStyle.green, emoji="📝")
         async def apply(self, inter: discord.Interaction, button: discord.ui.Button):
+            # Проверка ЧС при подаче заявки
+            if is_in_family_blacklist(inter.id):
+                reason = get_blacklist_reason(inter.id)
+                await inter.response.send_message(
+                    f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                    ephemeral=True
+                )
+                return
             modal = ApplicationModal(target_channel=target_channel)
             await inter.response.send_modal(modal)
 
-    # ✅ Правильная последовательность: сначала response, потом followup
     await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
     await interaction.followup.send(embed=embed, view=ApplyButton(), ephemeral=False)
 
@@ -233,6 +385,15 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
             self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Дублирующая проверка ЧС
+        if is_in_family_blacklist(interaction.user.id):
+            reason = get_blacklist_reason(interaction.user.id)
+            await interaction.response.send_message(
+                f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                ephemeral=True
+            )
+            return
+
         embed = discord.Embed(
             title="📄 Новая заявка на вступление",
             color=0x2b2d31,
