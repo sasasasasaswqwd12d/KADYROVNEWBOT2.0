@@ -1578,6 +1578,25 @@ async def ban_casino(interaction: discord.Interaction, member: discord.Member):
     )
     await interaction.response.send_message(embed=embed)
 
+# === /разбан_казино ===
+@bot.tree.command(name="разбан_казино", description="Снять бан с участника в казино")
+@app_commands.describe(member="Участник")
+async def unban_casino(interaction: discord.Interaction, member: discord.Member):
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+    if not is_casino_banned(member.id):
+        await interaction.response.send_message("❌ Этот участник не забанен в казино.", ephemeral=True)
+        return
+    unban_from_casino(member.id)
+    embed = discord.Embed(
+        title="✅ Разбан в казино",
+        description=f"Заместитель {interaction.user.mention} снял бан с {member.mention} в казино.",
+        color=0x2ecc71
+    )
+    await interaction.response.send_message(embed=embed)
+
 # === /магазин ===
 # 🔸 ИСПРАВЛЕНО: "100B_1" → "100B"
 SHOP_ROLES = {
