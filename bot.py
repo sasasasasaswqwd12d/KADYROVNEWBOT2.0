@@ -38,7 +38,7 @@ SHOP_ROLES = {
     1461403410124374282: 2_500_000,      # АЛЬТУХА
     1461403437756584126: 2_500_000,      # МЕРИКРИСТМАС
     1461403169342099626: 3_000_000,     # ПОВЕЛИТЕЛЬ
-    1461403469175849137: 3_400_000,     # БИГ БОСС
+    1461403469175849137: 3_000_000,     # БИГ БОСС
     1461403498053767219: 5_000_000,    # СУПЕР БОСС
     1461403526302531686: 5_500_000,    # КОРОЛЬ ПЛАНЕТЫ
     1461403355145572444: 10_000_000,    # ТОП 1 ФОРБС
@@ -480,14 +480,16 @@ def reset_strikes(user_id: int):
     conn.close()
 
 # === ФУНКЦИИ ДЛЯ ВЕТОК ===
-def save_thread_link(user_id: int, thread_url: str):
+def save_thread_link(user_id: int, thread_id: str):
+    """Сохраняет ID ветки (не URL!)"""
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO user_threads (user_id, thread_url) VALUES (?, ?)", (user_id, thread_url))
+    cursor.execute("INSERT OR REPLACE INTO user_threads (user_id, thread_url) VALUES (?, ?)", (user_id, thread_id))
     conn.commit()
     conn.close()
 
 def get_thread_link(user_id: int) -> str:
+    """Возвращает ID ветки (строка) или None"""
     conn = sqlite3.connect("voice_data.db")
     cursor = conn.cursor()
     cursor.execute("SELECT thread_url FROM user_threads WHERE user_id = ?", (user_id,))
@@ -579,6 +581,32 @@ async def give_white(interaction: discord.Interaction, member: discord.Member):
         description=f"Владелец {interaction.user.mention} добавил {member.mention} в вайт-лист.",
         color=0x2ecc71
     )
+    await interaction.response.send_message(embed=embed)
+
+# === /обнуление_кд ===
+@bot.tree.command(name="обнуление_кд", description="Сбросить все кулдауны для всех участников семьи")
+async def reset_all_cooldowns(interaction: discord.Interaction):
+    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    # Сбрасываем кд на заявки и work
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+
+    # Очищаем таблицы кд
+    cursor.execute("DELETE FROM applications")  # сбрасывает кд на заявки
+    cursor.execute("DELETE FROM work_timer")    # сбрасывает кд на /work
+
+    conn.commit()
+    conn.close()
+
+    embed = discord.Embed(
+        title="🔄 Все кулдауны сброшены!",
+        description=f"Заместитель {interaction.user.mention} сбросил все кулдауны для участников семьи.",
+        color=0x2ecc71
+    )
+    embed.add_field(name="Что сброшено", value="• Кд на подачу заявки\n• Кд на команду `/work`", inline=False)
     await interaction.response.send_message(embed=embed)
 
 # === СИСТЕМА БЕЗОПАСНОСТИ ===
@@ -943,7 +971,7 @@ class ApplicationControlView(discord.ui.View):
 
                 "5️⃣ **Правила поведения**\n"
                 "→ ❌ Нельзя оскорблять, фрикать, троллить\n"
-                "→ ❌ Запрещено попрошайничать\n"
+                "→ ❌ Запрещено попрошайничать (`/выдать_денег` только по заслугам)\n"
                 "→ ✅ Будьте активны в голосовых каналах, когда находитесь на сервере\n\n"
 
                 "💡 **Совет**: чем активнее вы — тем быстрее получите высокий ранг!\n"
@@ -1717,29 +1745,39 @@ async def on_message(message):
         try:
             parts = content.split("/")
             thread_id = int(parts[-1])
-            thread = await bot.fetch_channel(thread_id)
 
-            if thread.parent_id == THREADS_CHANNEL_ID:
-                save_thread_link(message.author.id, content)
-                await message.channel.send("✅ Ссылка на ветку сохранена! Теперь присылайте скриншоты активности.")
-            else:
-                await message.channel.send("❌ Эта ветка не из канала для заявок.")
-        except (ValueError, discord.NotFound, IndexError):
+            # Проверяем, существует ли ветка и имеет ли бот к ней доступ
+            try:
+                thread = await bot.fetch_channel(thread_id)
+                if thread.parent_id != THREADS_CHANNEL_ID:
+                    await message.channel.send("❌ Эта ветка не из канала для заявок.")
+                    return
+            except discord.NotFound:
+                await message.channel.send("❌ Ветка не найдена. Убедитесь, что ссылка правильная и бот имеет к ней доступ.")
+                return
+            except discord.Forbidden:
+                await message.channel.send("❌ Бот не имеет доступа к этой ветке. Убедитесь, что ветка публичная или бот добавлен в неё.")
+                return
+
+            save_thread_link(message.author.id, str(thread_id))  # Сохраняем ID, а не URL
+            await message.channel.send("✅ Ссылка на ветку сохранена! Теперь присылайте скриншоты активности.")
+
+        except (ValueError, IndexError):
             await message.channel.send("❌ Неверная ссылка на ветку.")
         return
 
     # Если прислали скриншот
     if message.attachments:
-        thread_url = get_thread_link(message.author.id)
-        if not thread_url:
+        thread_id_str = get_thread_link(message.author.id)
+        if not thread_id_str:
             await message.channel.send("❌ Сначала отправьте ссылку на свою ветку!")
             return
 
         try:
-            parts = thread_url.split("/")
-            thread_id = int(parts[-1])
+            thread_id = int(thread_id_str)
             thread = await bot.fetch_channel(thread_id)
 
+            # Создаём embed со скриншотом
             embed = discord.Embed(
                 title="📸 Новая активность",
                 description=f"Участник {message.author.mention} прислал скриншот:",
@@ -1748,6 +1786,7 @@ async def on_message(message):
             )
             embed.set_image(url=message.attachments[0].url)
 
+            # Пингуем лидеров
             leader = message.guild.get_role(LEADER_ROLE_ID)
             deputy = message.guild.get_role(DEPUTY_LEADER_ROLE_ID)
             ping_text = ""
@@ -1759,8 +1798,18 @@ async def on_message(message):
             await thread.send(content=ping_text, embed=embed)
             await message.channel.send("✅ Скриншот отправлен в вашу ветку!")
 
+        except discord.NotFound:
+            await message.channel.send("❌ Ветка была удалена. Пожалуйста, пришлите новую ссылку.")
+            # Удаляем старую запись
+            conn = sqlite3.connect("voice_data.db")
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_threads WHERE user_id = ?", (message.author.id,))
+            conn.commit()
+            conn.close()
+        except discord.Forbidden:
+            await message.channel.send("❌ Бот не может отправить сообщение в вашу ветку. Убедитесь, что он имеет права.")
         except Exception as e:
-            await message.channel.send("❌ Не удалось отправить скриншот. Убедитесь, что ветка существует.")
+            await message.channel.send(f"❌ Ошибка: {str(e)}")
         return
 
     # Автоответ на любое другое сообщение
