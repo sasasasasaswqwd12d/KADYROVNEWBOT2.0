@@ -40,7 +40,7 @@ SHOP_ROLES = {
     1461403169342099626: 3_000_000,     # ПОВЕЛИТЕЛЬ
     1461403469175849137: 3_000_000,     # БИГ БОСС
     1461403498053767219: 5_000_000,    # СУПЕР БОСС
-    1461403526302531686: 5_500_000,    # КОРОЛЬ ПЛАНЕТЫ
+    1461403526302531686: 5_000_000,    # КОРОЛЬ ПЛАНЕТЫ
     1461403355145572444: 10_000_000,    # ТОП 1 ФОРБС
     1461403584360091651: 100_000_000   # РОЛЬ С ПРАВАМИ МОДЕРАТОРА
 }
@@ -375,6 +375,8 @@ def get_profile(user_id: int):
     return result
 
 async def log_action(guild, action: str, details: str, color=0x2b2d31):
+    if not guild:
+        return
     log_channel = guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         embed = discord.Embed(
@@ -383,7 +385,10 @@ async def log_action(guild, action: str, details: str, color=0x2b2d31):
             color=color,
             timestamp=discord.utils.utcnow()
         )
-        await log_channel.send(embed=embed)
+        try:
+            await log_channel.send(embed=embed)
+        except discord.Forbidden:
+            pass
 
 def has_any_role(member: discord.Member, role_ids: list) -> bool:
     if member.guild_permissions.administrator:
@@ -391,6 +396,8 @@ def has_any_role(member: discord.Member, role_ids: list) -> bool:
     return any(role.id in role_ids for role in member.roles)
 
 def backup_guild(guild: discord.Guild):
+    if not guild:
+        return
     data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "guild_id": guild.id,
@@ -520,6 +527,9 @@ async def on_voice_state_update(member, before, after):
 
 @bot.event
 async def on_member_update(before, after):
+    if not after.guild:
+        return
+
     added_roles = set(after.roles) - set(before.roles)
     if not added_roles:
         return
@@ -572,7 +582,10 @@ async def sync_command(ctx):
 @app_commands.describe(member="Участник")
 async def give_white(interaction: discord.Interaction, member: discord.Member):
     if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только владельцу бота.", ephemeral=True)
         return
 
     add_to_white_list(member.id)
@@ -581,13 +594,19 @@ async def give_white(interaction: discord.Interaction, member: discord.Member):
         description=f"Владелец {interaction.user.mention} добавил {member.mention} в вайт-лист.",
         color=0x2ecc71
     )
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /обнуление_кд ===
 @bot.tree.command(name="обнуление_кд", description="Сбросить все кулдауны для всех участников семьи")
 async def reset_all_cooldowns(interaction: discord.Interaction):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     # Сбрасываем кд на заявки и work
@@ -607,38 +626,61 @@ async def reset_all_cooldowns(interaction: discord.Interaction):
         color=0x2ecc71
     )
     embed.add_field(name="Что сброшено", value="• Кд на подачу заявки\n• Кд на команду `/work`", inline=False)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === СИСТЕМА БЕЗОПАСНОСТИ ===
 @bot.event
 async def on_guild_channel_delete(channel):
-    await handle_security_violation(channel.guild, channel.last_message.author if channel.last_message else None, "удаление канала")
+    if not channel.guild or not channel.guild.me:
+        return
+    try:
+        await handle_security_violation(channel.guild, channel.last_message.author if channel.last_message else None, "удаление канала")
+    except Exception:
+        pass
 
 @bot.event
 async def on_guild_channel_update(before, after):
+    if not after.guild or not after.guild.me:
+        return
     if before.name != after.name or before.overwrites != after.overwrites:
-        async for entry in after.guild.audit_logs(action=discord.AuditLogAction.channel_update, limit=1):
-            if entry.target.id == after.id:
-                await handle_security_violation(after.guild, entry.user, "редактирование канала")
-                break
+        try:
+            async for entry in after.guild.audit_logs(action=discord.AuditLogAction.channel_update, limit=1):
+                if entry.target.id == after.id:
+                    await handle_security_violation(after.guild, entry.user, "редактирование канала")
+                    break
+        except (discord.Forbidden, discord.NotFound):
+            pass
 
 @bot.event
 async def on_guild_role_delete(role):
-    async for entry in role.guild.audit_logs(action=discord.AuditLogAction.role_delete, limit=1):
-        if entry.target.id == role.id:
-            await handle_security_violation(role.guild, entry.user, "удаление роли")
-            break
+    if not role.guild or not role.guild.me:
+        return
+    try:
+        async for entry in role.guild.audit_logs(action=discord.AuditLogAction.role_delete, limit=1):
+            if entry.target.id == role.id:
+                await handle_security_violation(role.guild, entry.user, "удаление роли")
+                break
+    except (discord.Forbidden, discord.NotFound):
+        pass
 
 @bot.event
 async def on_guild_role_update(before, after):
+    if not after.guild or not after.guild.me:
+        return
     if before.name != after.name or before.permissions != after.permissions or before.color != after.color:
-        async for entry in after.guild.audit_logs(action=discord.AuditLogAction.role_update, limit=1):
-            if entry.target.id == after.id:
-                await handle_security_violation(after.guild, entry.user, "редактирование роли")
-                break
+        try:
+            async for entry in after.guild.audit_logs(action=discord.AuditLogAction.role_update, limit=1):
+                if entry.target.id == after.id:
+                    await handle_security_violation(after.guild, entry.user, "редактирование роли")
+                    break
+        except (discord.Forbidden, discord.NotFound):
+            pass
 
 async def handle_security_violation(guild, user, action):
-    if not user or user.bot or user.id == bot.user.id:
+    if not guild or not user or user.bot or user.id == bot.user.id:
         return
 
     # Владелец и вайт-лист игнорируются
@@ -650,20 +692,21 @@ async def handle_security_violation(guild, user, action):
         return
 
     strikes = add_strike(user.id)
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
 
     if strikes == 1:
         # Снимаем все роли семьи
         roles_to_remove = [role for role in user.roles if role.id in FAMILY_ROLES.values()]
         if roles_to_remove:
-            await user.remove_roles(*roles_to_remove)
+            try:
+                await user.remove_roles(*roles_to_remove)
+            except discord.Forbidden:
+                pass
         embed = discord.Embed(
             title="⚠️ Нарушение безопасности",
             description=f"Участник {user.mention} совершил действие: **{action}**.\nСняты все роли семьи.",
             color=0xffa500
         )
-        if log_channel:
-            await log_channel.send(embed=embed)
+        await log_action(guild, "Нарушение безопасности (1)", f"Участник: {user.mention}\nДействие: {action}", color=0xffa500)
 
     elif strikes == 2:
         # Кик с сервера
@@ -674,8 +717,7 @@ async def handle_security_violation(guild, user, action):
                 description=f"Участник {user.mention} был **кикнут** за повторное нарушение: **{action}**.",
                 color=0xff4500
             )
-            if log_channel:
-                await log_channel.send(embed=embed)
+            await log_action(guild, "Кик за нарушение (2)", f"Участник: {user.mention}\nДействие: {action}", color=0xff4500)
         except discord.Forbidden:
             pass
 
@@ -688,8 +730,7 @@ async def handle_security_violation(guild, user, action):
                 description=f"Участник {user.mention} был **забанен** за множественные нарушения: **{action}**.",
                 color=0xff0000
             )
-            if log_channel:
-                await log_channel.send(embed=embed)
+            await log_action(guild, "Бан за нарушение (3+)", f"Участник: {user.mention}\nДействие: {action}", color=0xff0000)
         except discord.Forbidden:
             pass
 
@@ -698,24 +739,36 @@ async def handle_security_violation(guild, user, action):
 @app_commands.describe(user_id="ID пользователя", reason="Причина ЧС")
 async def blacklist_family(interaction: discord.Interaction, user_id: str, reason: str):
     if FAMILY_ROLES["deputy_leader"] not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     try:
         uid = int(user_id)
     except ValueError:
-        await interaction.response.send_message("❌ ID должен быть числом.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ ID должен быть числом.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
         return
 
     member = interaction.guild.get_member(uid)
     if not member:
-        await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Пользователь не найден на сервере.", ephemeral=True)
         return
 
     roles_to_remove = [interaction.guild.get_role(rid) for rid in FAMILY_ROLES.values()]
     roles_to_remove = [r for r in roles_to_remove if r and r in member.roles]
     if roles_to_remove:
-        await member.remove_roles(*roles_to_remove)
+        try:
+            await member.remove_roles(*roles_to_remove)
+        except discord.Forbidden:
+            pass
 
     add_to_family_blacklist(uid, reason, interaction.user.id)
     await log_action(
@@ -735,24 +788,36 @@ async def blacklist_family(interaction: discord.Interaction, user_id: str, reaso
         embed.add_field(name="Снятые роли", value=", ".join(r.name for r in roles_to_remove), inline=False)
     embed.set_footer(text=f"Выдал: {interaction.user}")
 
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /снять_чс ===
 @bot.tree.command(name="снять_чс", description="Снять чёрный список семьи с участника")
 @app_commands.describe(user_id="ID пользователя")
 async def unblacklist_family(interaction: discord.Interaction, user_id: str):
     if FAMILY_ROLES["deputy_leader"] not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     try:
         uid = int(user_id)
     except ValueError:
-        await interaction.response.send_message("❌ ID должен быть числом.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ ID должен быть числом.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
         return
 
     if not is_in_family_blacklist(uid):
-        await interaction.response.send_message("❌ Пользователь не в чёрном списке семьи.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Пользователь не в чёрном списке семьи.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Пользователь не в чёрном списке семьи.", ephemeral=True)
         return
 
     remove_from_family_blacklist(uid)
@@ -773,7 +838,10 @@ async def unblacklist_family(interaction: discord.Interaction, user_id: str):
     )
     embed.set_footer(text=f"Снял: {interaction.user}")
 
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /набор ===
 @bot.tree.command(name="набор", description="Открыть набор в указанном канале")
@@ -781,22 +849,34 @@ async def unblacklist_family(interaction: discord.Interaction, user_id: str):
 async def recruitment(interaction: discord.Interaction, channel_id: str):
     allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"]]
     if not has_any_role(interaction.user, allowed_roles):
-        await interaction.response.send_message("❌ Эта команда доступна только Лидеру и Заместителю.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Лидеру и Заместителю.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Лидеру и Заместителю.", ephemeral=True)
         return
 
     try:
         cid = int(channel_id)
     except ValueError:
-        await interaction.response.send_message("❌ ID канала должен быть числом.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ ID канала должен быть числом.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ ID канала должен быть числом.", ephemeral=True)
         return
 
     target_channel = interaction.guild.get_channel(cid)
     if not target_channel or not isinstance(target_channel, discord.TextChannel):
-        await interaction.response.send_message("❌ Канал не найден или недоступен.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Канал не найден или недоступен.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Канал не найден или недоступен.", ephemeral=True)
         return
 
     if is_in_family_blacklist(interaction.user.id):
-        await interaction.response.send_message("❌ Вы не можете открывать набор, находясь в ЧС семьи.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Вы не можете открывать набор, находясь в ЧС семьи.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Вы не можете открывать набор, находясь в ЧС семьи.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -821,21 +901,36 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
         async def apply(self, inter: discord.Interaction, button: discord.ui.Button):
             if is_in_family_blacklist(inter.id):
                 reason = get_blacklist_reason(inter.id)
-                await inter.response.send_message(
-                    f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
-                    ephemeral=True
-                )
+                try:
+                    await inter.response.send_message(
+                        f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                        ephemeral=True
+                    )
+                except discord.NotFound:
+                    await inter.followup.send(
+                        f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                        ephemeral=True
+                    )
                 return
             if not can_submit_application(inter.user.id):
-                await inter.response.send_message(
-                    "❌ Вы можете подавать заявку не чаще одного раза в день.",
-                    ephemeral=True
-                )
+                try:
+                    await inter.response.send_message(
+                        "❌ Вы можете подавать заявку не чаще одного раза в день.",
+                        ephemeral=True
+                    )
+                except discord.NotFound:
+                    await inter.followup.send(
+                        "❌ Вы можете подавать заявку не чаще одного раза в день.",
+                        ephemeral=True
+                    )
                 return
             modal = ApplicationModal(target_channel=target_channel)
             await inter.response.send_modal(modal)
 
-    await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
+    try:
+        await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
+    except discord.NotFound:
+        await interaction.followup.send("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
     await interaction.followup.send(embed=embed, view=ApplyButton(), ephemeral=False)
 
 # === МОДАЛЬНОЕ ОКНО ЗАЯВКИ ===
@@ -882,16 +977,28 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
     async def on_submit(self, interaction: discord.Interaction):
         if is_in_family_blacklist(interaction.user.id):
             reason = get_blacklist_reason(interaction.user.id)
-            await interaction.response.send_message(
-                f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
-                ephemeral=True
-            )
+            try:
+                await interaction.response.send_message(
+                    f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                    ephemeral=True
+                )
+            except discord.NotFound:
+                await interaction.followup.send(
+                    f"❌ Вы находитесь в чёрном списке семьи.\n**Причина:** {reason}",
+                    ephemeral=True
+                )
             return
         if not can_submit_application(interaction.user.id):
-            await interaction.response.send_message(
-                "❌ Вы можете подавать заявку не чаще одного раза в день.",
-                ephemeral=True
-            )
+            try:
+                await interaction.response.send_message(
+                    "❌ Вы можете подавать заявку не чаще одного раза в день.",
+                    ephemeral=True
+                )
+            except discord.NotFound:
+                await interaction.followup.send(
+                    "❌ Вы можете подавать заявку не чаще одного раза в день.",
+                    ephemeral=True
+                )
             return
 
         record_application(interaction.user.id)
@@ -911,7 +1018,10 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
 
         view = ApplicationControlView(applicant=interaction.user)
         await self.target_channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
+        try:
+            await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
 
 # === УПРАВЛЕНИЕ ЗАЯВКОЙ ===
 class ApplicationControlView(discord.ui.View):
@@ -921,7 +1031,10 @@ class ApplicationControlView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
-            await interaction.response.send_message("❌ У вас нет прав для управления заявками.", ephemeral=True)
+            try:
+                await interaction.response.send_message("❌ У вас нет прав для управления заявками.", ephemeral=True)
+            except discord.NotFound:
+                await interaction.followup.send("❌ У вас нет прав для управления заявками.", ephemeral=True)
             return False
         return True
 
@@ -929,9 +1042,15 @@ class ApplicationControlView(discord.ui.View):
     async def call_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await self.applicant.send("🔔 **Вы вызваны на обзвон в семью `ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ`!**\nЗайдите в любой открытый голосовой канал.")
-            await interaction.response.send_message("✅ Уведомление отправлено.", ephemeral=True)
+            try:
+                await interaction.response.send_message("✅ Уведомление отправлено.", ephemeral=True)
+            except discord.NotFound:
+                await interaction.followup.send("✅ Уведомление отправлено.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Не удалось отправить ЛС.", ephemeral=True)
+            try:
+                await interaction.response.send_message("❌ Не удалось отправить ЛС.", ephemeral=True)
+            except discord.NotFound:
+                await interaction.followup.send("❌ Не удалось отправить ЛС.", ephemeral=True)
 
     @discord.ui.button(label="✅ Одобрено", style=discord.ButtonStyle.green, emoji="🟢")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -939,7 +1058,10 @@ class ApplicationControlView(discord.ui.View):
             await self.applicant.send("🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!")
             role = interaction.guild.get_role(FAMILY_ROLES["member"])
             if role and role not in self.applicant.roles:
-                await self.applicant.add_roles(role)
+                try:
+                    await self.applicant.add_roles(role)
+                except discord.Forbidden:
+                    pass
         except discord.Forbidden:
             pass
 
@@ -986,8 +1108,14 @@ class ApplicationControlView(discord.ui.View):
         embed.title = "✅ Заявка одобрена"
         for child in self.children:
             child.disabled = True
-        await interaction.message.edit(embed=embed, view=self)
-        await interaction.response.defer()
+        try:
+            await interaction.message.edit(embed=embed, view=self)
+        except discord.NotFound:
+            pass
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            pass
 
         await log_action(
             interaction.guild,
@@ -1024,8 +1152,14 @@ class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
         embed.title = "❌ Заявка отклонена"
         reason_value = self.reason.value[:1020] + ("..." if len(self.reason.value) > 1020 else "")
         embed.add_field(name="💬 Причина", value=reason_value, inline=False)
-        await self.message.edit(embed=embed, view=None)
-        await interaction.response.send_message("✅ Отказ обработан.", ephemeral=True)
+        try:
+            await self.message.edit(embed=embed, view=None)
+        except discord.NotFound:
+            pass
+        try:
+            await interaction.response.send_message("✅ Отказ обработан.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("✅ Отказ обработан.", ephemeral=True)
 
         await log_action(
             interaction.guild,
@@ -1038,7 +1172,10 @@ class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
 @bot.tree.command(name="статус_заявок", description="Показать статус обработки заявок")
 async def application_status(interaction: discord.Interaction):
     if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
-        await interaction.response.send_message("❌ У вас нет прав для просмотра статуса заявок.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ У вас нет прав для просмотра статуса заявок.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ У вас нет прав для просмотра статуса заявок.", ephemeral=True)
         return
 
     pending_count = get_pending_applications_count()
@@ -1053,21 +1190,27 @@ async def application_status(interaction: discord.Interaction):
     embed.add_field(name="Обработка", value="Доступна для ролей [ʀᴇᴄʀᴜɪᴛ] и выше", inline=False)
     embed.set_footer(text="Используйте /набор для открытия нового набора")
 
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /состав_семьи ===
 @bot.tree.command(name="состав_семьи", description="Показать состав семьи по рангам")
 async def family_members(interaction: discord.Interaction):
     if not any(role.id == FAMILY_ROLES["member"] for role in interaction.user.roles):
-        await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
         return
 
     rank_order = [
         (FAMILY_ROLES["leader"], "[Лидер]"),
         (FAMILY_ROLES["deputy_leader"], "[Заместитель Лидера]"),
         (FAMILY_ROLES["high_staff"], "[ʜɪɢʜ sᴛᴀꜰꜰ]"),
-        (FAMILY_ROLES["recruit"], "[ʀᴇᴄʀᴜɪᴛ]"),
-        (FAMILY_ROLES["main_staff"], "[ᴍᴀɪɴ sᴛᴀꜰꜰ]")
+        (FAMILY_ROLES["main_staff"], "[ᴍᴀɪɴ sᴛᴀꜰꜰ]"),
+        (FAMILY_ROLES["recruit"], "[ʀᴇᴄʀᴜɪᴛ]")
     ]
 
     embed = discord.Embed(
@@ -1111,7 +1254,10 @@ async def family_members(interaction: discord.Interaction):
             color=0xc41e3a
         )
 
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /состояние ===
 @bot.tree.command(name="состояние", description="Показать статистику пользователя по голосовым каналам")
@@ -1119,17 +1265,26 @@ async def family_members(interaction: discord.Interaction):
 async def user_state(interaction: discord.Interaction, user: discord.User):
     allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"], 1460688847267565744]
     if not has_any_role(interaction.user, allowed_roles):
-        await interaction.response.send_message("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
         return
 
     member = interaction.guild.get_member(user.id)
     if not member:
-        await interaction.response.send_message("❌ Пользователь не на сервере.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Пользователь не на сервере.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Пользователь не на сервере.", ephemeral=True)
         return
 
     sessions = get_user_sessions(user.id)
     if not sessions:
-        await interaction.response.send_message(f"🔇 У {user.mention} нет записей о пребывании в голосовых.", ephemeral=True)
+        try:
+            await interaction.response.send_message(f"🔇 У {user.mention} нет записей о пребывании в голосовых.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send(f"🔇 У {user.mention} нет записей о пребывании в голосовых.", ephemeral=True)
         return
 
     total_seconds = 0
@@ -1150,13 +1305,19 @@ async def user_state(interaction: discord.Interaction, user: discord.User):
         color=0xc41e3a
     )
     embed.add_field(name="Последние сессии", value="\n".join(details) or "Нет данных", inline=False)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /профиль ===
 @bot.tree.command(name="профиль", description="Заполнить свой профиль семьи")
 async def profile_command(interaction: discord.Interaction):
     if FAMILY_MEMBER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
         return
 
     class ProfileModal(discord.ui.Modal, title="Ваш профиль семьи"):
@@ -1179,7 +1340,10 @@ async def profile_command(interaction: discord.Interaction):
 
         async def on_submit(self, inter: discord.Interaction):
             save_profile(inter.user.id, self.nick.value, self.static_id.value)
-            await inter.response.send_message("✅ Ваш профиль успешно сохранён!", ephemeral=True)
+            try:
+                await inter.response.send_message("✅ Ваш профиль успешно сохранён!", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("✅ Ваш профиль успешно сохранён!", ephemeral=True)
 
     await interaction.response.send_modal(ProfileModal())
 
@@ -1188,7 +1352,10 @@ async def profile_command(interaction: discord.Interaction):
 @app_commands.describe(member="Участник для просмотра")
 async def view_profile(interaction: discord.Interaction, member: discord.Member):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     profile = get_profile(member.id)
@@ -1206,23 +1373,35 @@ async def view_profile(interaction: discord.Interaction, member: discord.Member)
     else:
         embed.description = "❌ Профиль не заполнен."
 
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /восстановить_состав ===
 @bot.tree.command(name="восстановить_состав", description="Восстановить состав семьи из бэкапа")
 @app_commands.describe(date="Дата бэкапа (формат: YYYY-MM-DD_HH-MM)")
 async def restore_backup(interaction: discord.Interaction, date: str):
     if LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Только Лидер может восстанавливать состав.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Только Лидер может восстанавливать состав.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Только Лидер может восстанавливать состав.", ephemeral=True)
         return
 
     filepath = f"backups/backup_{date}.json"
     if not os.path.exists(filepath):
         files = "\n".join(f"`{f.replace('backup_', '').replace('.json', '')}`" for f in sorted(os.listdir("backups")))
-        await interaction.response.send_message(
-            f"❌ Бэкап не найден.\nДоступные даты:\n{files}",
-            ephemeral=True
-        )
+        try:
+            await interaction.response.send_message(
+                f"❌ Бэкап не найден.\nДоступные даты:\n{files}",
+                ephemeral=True
+            )
+        except discord.NotFound:
+            await interaction.followup.send(
+                f"❌ Бэкап не найден.\nДоступные даты:\n{files}",
+                ephemeral=True
+            )
         return
 
     with open(filepath, "r", encoding="utf-8") as f:
@@ -1239,8 +1418,11 @@ async def restore_backup(interaction: discord.Interaction, date: str):
             if role and role not in member.roles:
                 roles_to_add.append(role)
         if roles_to_add:
-            await member.add_roles(*roles_to_add)
-            restored += 1
+            try:
+                await member.add_roles(*roles_to_add)
+                restored += 1
+            except discord.Forbidden:
+                pass
 
     embed = discord.Embed(
         title="✅ Восстановление завершено",
@@ -1248,7 +1430,10 @@ async def restore_backup(interaction: discord.Interaction, date: str):
         color=0x00ff00
     )
     embed.add_field(name="Файл", value=f"`{date}.json`", inline=False)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === КАЗИНО ===
 
@@ -1256,7 +1441,10 @@ async def restore_backup(interaction: discord.Interaction, date: str):
 @bot.tree.command(name="баланс", description="Показать ваш баланс в казино")
 async def balance_command(interaction: discord.Interaction):
     if is_casino_banned(interaction.user.id):
-        await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Вы забанены в казино.", ephemeral=True)
         return
     balance = get_balance(interaction.user.id)
     embed = discord.Embed(
@@ -1264,7 +1452,10 @@ async def balance_command(interaction: discord.Interaction):
         description=f"У вас на счету: **${balance:,}**",
         color=0x2ecc71
     )
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: создать кнопки казино ===
 def create_casino_view(user_id: int):
@@ -1274,10 +1465,16 @@ def create_casino_view(user_id: int):
 
         async def interaction_check(self, interaction: discord.Interaction) -> bool:
             if is_casino_banned(interaction.user.id):
-                await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+                try:
+                    await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+                except discord.NotFound:
+                    await interaction.followup.send("❌ Вы забанены в казино.", ephemeral=True)
                 return False
             if interaction.user.id != user_id:
-                await interaction.response.send_message("❌ Эта игра не для вас.", ephemeral=True)
+                try:
+                    await interaction.response.send_message("❌ Эта игра не для вас.", ephemeral=True)
+                except discord.NotFound:
+                    await interaction.followup.send("❌ Эта игра не для вас.", ephemeral=True)
                 return False
             return True
 
@@ -1312,10 +1509,16 @@ class DiceModal(discord.ui.Modal, title="🎲 Кости"):
         try:
             amount = int(self.bet.value.replace(",", "").replace(" ", ""))
         except ValueError:
-            await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Сумма должна быть числом.", ephemeral=True)
             return
         if amount < self.min_bet or amount > get_balance(inter.user.id):
-            await inter.response.send_message("❌ Неверная сумма.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Неверная сумма.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Неверная сумма.", ephemeral=True)
             return
 
         balance = get_balance(inter.user.id)
@@ -1333,7 +1536,10 @@ class DiceModal(discord.ui.Modal, title="🎲 Кости"):
         new_balance = get_balance(inter.user.id)
         embed = discord.Embed(title="🎲 Кости", description=result, color=color)
         embed.set_footer(text=f"Баланс: ${new_balance:,}")
-        await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        try:
+            await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        except discord.NotFound:
+            pass
 
 class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
     def __init__(self, min_bet=500, user_id=None):
@@ -1347,10 +1553,16 @@ class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
         try:
             amount = int(self.bet.value.replace(",", "").replace(" ", ""))
         except ValueError:
-            await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Сумма должна быть числом.", ephemeral=True)
             return
         if amount < self.min_bet or amount > get_balance(inter.user.id):
-            await inter.response.send_message("❌ Неверная сумма.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Неверная сумма.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Неверная сумма.", ephemeral=True)
             return
 
         balance = get_balance(inter.user.id)
@@ -1382,7 +1594,10 @@ class SlotsModal(discord.ui.Modal, title="🎰 Слоты"):
         new_balance = get_balance(inter.user.id)
         embed = discord.Embed(title="🎰 Слоты", description=result, color=color)
         embed.set_footer(text=f"Баланс: ${new_balance:,}")
-        await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        try:
+            await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        except discord.NotFound:
+            pass
 
 class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
     def __init__(self, min_bet=100, user_id=None):
@@ -1396,10 +1611,16 @@ class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
         try:
             amount = int(self.bet.value.replace(",", "").replace(" ", ""))
         except ValueError:
-            await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Сумма должна быть числом.", ephemeral=True)
             return
         if amount < self.min_bet or amount > get_balance(inter.user.id):
-            await inter.response.send_message("❌ Неверная сумма.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Неверная сумма.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Неверная сумма.", ephemeral=True)
             return
 
         balance = get_balance(inter.user.id)
@@ -1417,7 +1638,10 @@ class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
         new_balance = get_balance(inter.user.id)
         embed = discord.Embed(title="🔮 Шанс", description=result, color=color)
         embed.set_footer(text=f"Баланс: ${new_balance:,}")
-        await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        try:
+            await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        except discord.NotFound:
+            pass
 
 class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
     def __init__(self, min_bet=1000, user_id=None):
@@ -1434,10 +1658,16 @@ class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
             number = int(self.number.value)
             amount = int(self.bet.value.replace(",", "").replace(" ", ""))
         except ValueError:
-            await inter.response.send_message("❌ Число и сумма должны быть числами.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Число и сумма должны быть числами.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Число и сумма должны быть числами.", ephemeral=True)
             return
         if number < 1 or number > 36 or amount < self.min_bet or amount > get_balance(inter.user.id):
-            await inter.response.send_message("❌ Неверные данные.", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Неверные данные.", ephemeral=True)
+            except discord.NotFound:
+                await inter.followup.send("❌ Неверные данные.", ephemeral=True)
             return
 
         balance = get_balance(inter.user.id)
@@ -1463,13 +1693,19 @@ class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
         new_balance = get_balance(inter.user.id)
         embed = discord.Embed(title="🎡 Рулетка", description=result, color=color)
         embed.set_footer(text=f"Баланс: ${new_balance:,}")
-        await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        try:
+            await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
+        except discord.NotFound:
+            pass
 
 # === /казино ===
 @bot.tree.command(name="казино", description="Играть в казино")
 async def casino_command(interaction: discord.Interaction):
     if is_casino_banned(interaction.user.id):
-        await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Вы забанены в казино.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Вы забанены в казино.", ephemeral=True)
         return
     balance = get_balance(interaction.user.id)
     embed = discord.Embed(
@@ -1477,7 +1713,10 @@ async def casino_command(interaction: discord.Interaction):
         description=f"{interaction.user.mention}, ваш баланс: **${balance:,}**\nВыберите игру:",
         color=0x9b59b6
     )
-    await interaction.response.send_message(embed=embed, view=create_casino_view(interaction.user.id))
+    try:
+        await interaction.response.send_message(embed=embed, view=create_casino_view(interaction.user.id))
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed, view=create_casino_view(interaction.user.id))
 
 # === /топ_казино ===
 @bot.tree.command(name="топ_казино", description="Топ-10 богачей казино")
@@ -1489,7 +1728,10 @@ async def top_casino(interaction: discord.Interaction):
     conn.close()
 
     if not top_players:
-        await interaction.response.send_message("Никто ещё не играл в казино.", ephemeral=True)
+        try:
+            await interaction.response.send_message("Никто ещё не играл в казино.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("Никто ещё не играл в казино.", ephemeral=True)
         return
 
     description = ""
@@ -1503,17 +1745,26 @@ async def top_casino(interaction: discord.Interaction):
         description=description,
         color=0xf1c40f
     )
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /work ===
 @bot.tree.command(name="work", description="Работать и получить $10,000")
 async def work_command(interaction: discord.Interaction):
     if not any(role.id == FAMILY_MEMBER_ROLE_ID for role in interaction.user.roles):
-        await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
         return
 
     if not can_work(interaction.user.id):
-        await interaction.response.send_message("⏳ Вы можете работать раз в 5 минут.", ephemeral=True)
+        try:
+            await interaction.response.send_message("⏳ Вы можете работать раз в 5 минут.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("⏳ Вы можете работать раз в 5 минут.", ephemeral=True)
         return
 
     current = get_balance(interaction.user.id)
@@ -1526,18 +1777,27 @@ async def work_command(interaction: discord.Interaction):
         description=f"Вы заработали **$10,000**!\nВаш новый баланс: **${new_balance:,}**",
         color=0x2ecc71
     )
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /выдать_денег ===
 @bot.tree.command(name="выдать_денег", description="Выдать деньги участнику")
 @app_commands.describe(member="Участник", amount="Сумма в долларах")
 async def give_money(interaction: discord.Interaction, member: discord.Member, amount: int):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     if amount <= 0:
-        await interaction.response.send_message("❌ Сумма должна быть положительной.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Сумма должна быть положительной.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Сумма должна быть положительной.", ephemeral=True)
         return
 
     current = get_balance(member.id)
@@ -1550,14 +1810,20 @@ async def give_money(interaction: discord.Interaction, member: discord.Member, a
         color=0x2ecc71
     )
     embed.add_field(name="Новый баланс", value=f"${new_balance:,}", inline=False)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /обнулить_баланс ===
 @bot.tree.command(name="обнулить_баланс", description="Обнулить баланс участника за нарушения")
 @app_commands.describe(member="Участник")
 async def reset_balance(interaction: discord.Interaction, member: discord.Member):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     old_balance = get_balance(member.id)
@@ -1569,13 +1835,19 @@ async def reset_balance(interaction: discord.Interaction, member: discord.Member
         color=0xff0000
     )
     embed.add_field(name="Предыдущий баланс", value=f"${old_balance:,}", inline=False)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /обнулить_всех ===
 @bot.tree.command(name="обнулить_всех", description="Обнулить балансы всех участников семьи")
 async def reset_all_balances(interaction: discord.Interaction):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     members = get_all_family_members(interaction.guild)
@@ -1592,18 +1864,27 @@ async def reset_all_balances(interaction: discord.Interaction):
         color=0xff0000
     )
     embed.add_field(name="Затронуто участников", value=str(len(members)), inline=False)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /выдать_всем_деньги ===
 @bot.tree.command(name="выдать_всем_деньги", description="Выдать деньги всем участникам семьи")
 @app_commands.describe(amount="Сумма в долларах")
 async def give_money_to_all(interaction: discord.Interaction, amount: int):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     if amount <= 0:
-        await interaction.response.send_message("❌ Сумма должна быть положительной.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Сумма должна быть положительной.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Сумма должна быть положительной.", ephemeral=True)
         return
 
     members = get_all_family_members(interaction.guild)
@@ -1624,18 +1905,27 @@ async def give_money_to_all(interaction: discord.Interaction, amount: int):
     )
     embed.add_field(name="Получателей", value=str(len(members)), inline=True)
     embed.add_field(name="Общая сумма", value=f"${amount * len(members):,}", inline=True)
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /бан_казино ===
 @bot.tree.command(name="бан_казино", description="Забанить участника в казино")
 @app_commands.describe(member="Участник")
 async def ban_casino(interaction: discord.Interaction, member: discord.Member):
     if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
-        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
 
     if is_casino_banned(member.id):
-        await interaction.response.send_message("❌ Этот участник уже забанен в казино.", ephemeral=True)
+        try:
+            await interaction.response.send_message("❌ Этот участник уже забанен в казино.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ Этот участник уже забанен в казино.", ephemeral=True)
         return
 
     ban_from_casino(member.id)
@@ -1644,7 +1934,10 @@ async def ban_casino(interaction: discord.Interaction, member: discord.Member):
         description=f"Заместитель {interaction.user.mention} забанил {member.mention} в казино.",
         color=0xff0000
     )
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed)
 
 # === /магазин ===
 @bot.tree.command(name="магазин", description="Купить роль или вирты")
@@ -1688,27 +1981,45 @@ async def shop_command(interaction: discord.Interaction):
                 role_id = int(choice.split("_")[1])
                 price = SHOP_ROLES[role_id]
                 if balance < price:
-                    await inter.response.send_message("❌ Недостаточно средств!", ephemeral=True)
+                    try:
+                        await inter.response.send_message("❌ Недостаточно средств!", ephemeral=True)
+                    except discord.NotFound:
+                        await inter.followup.send("❌ Недостаточно средств!", ephemeral=True)
                     return
                 role = inter.guild.get_role(role_id)
                 if not role:
-                    await inter.response.send_message("❌ Роль не найдена.", ephemeral=True)
+                    try:
+                        await inter.response.send_message("❌ Роль не найдена.", ephemeral=True)
+                    except discord.NotFound:
+                        await inter.followup.send("❌ Роль не найдена.", ephemeral=True)
                     return
                 if role in inter.user.roles:
-                    await inter.response.send_message("❌ У вас уже есть эта роль.", ephemeral=True)
+                    try:
+                        await inter.response.send_message("❌ У вас уже есть эта роль.", ephemeral=True)
+                    except discord.NotFound:
+                        await inter.followup.send("❌ У вас уже есть эта роль.", ephemeral=True)
                     return
                 set_balance(inter.user.id, balance - price)
-                await inter.user.add_roles(role)
+                try:
+                    await inter.user.add_roles(role)
+                except discord.Forbidden:
+                    pass
                 embed_resp = discord.Embed(title="✅ Роль получена!", description=f"Вы купили **{role.name}** за **${price:,}**.", color=0x2ecc71)
                 embed_resp.set_footer(text=f"Баланс: ${get_balance(inter.user.id):,}")
-                await inter.response.send_message(embed=embed_resp)
+                try:
+                    await inter.response.send_message(embed=embed_resp)
+                except discord.NotFound:
+                    await inter.followup.send(embed=embed_resp)
 
             elif choice.startswith("virt_"):
                 key = choice.split("_")[1]
                 item = VIRT_ITEMS[key]
                 price = item["price"]
                 if balance < price:
-                    await inter.response.send_message("❌ Недостаточно средств!", ephemeral=True)
+                    try:
+                        await inter.response.send_message("❌ Недостаточно средств!", ephemeral=True)
+                    except discord.NotFound:
+                        await inter.followup.send("❌ Недостаточно средств!", ephemeral=True)
                     return
                 set_balance(inter.user.id, balance - price)
 
@@ -1719,7 +2030,10 @@ async def shop_command(interaction: discord.Interaction):
                         description=f"**Покупатель:** {inter.user.mention}\n**Товар:** {item['name']}\n**Сумма:** ${price:,}",
                         color=0x2ecc71
                     )
-                    await notify_channel.send(embed=item_embed)
+                    try:
+                        await notify_channel.send(embed=item_embed)
+                    except discord.Forbidden:
+                        pass
 
                 embed_resp = discord.Embed(
                     title="✅ Заказ принят!",
@@ -1727,9 +2041,15 @@ async def shop_command(interaction: discord.Interaction):
                     color=0x2ecc71
                 )
                 embed_resp.set_footer(text=f"Баланс: ${get_balance(inter.user.id):,}")
-                await inter.response.send_message(embed=embed_resp)
+                try:
+                    await inter.response.send_message(embed=embed_resp)
+                except discord.NotFound:
+                    await inter.followup.send(embed=embed_resp)
 
-    await interaction.response.send_message(embed=embed, view=ShopView())
+    try:
+        await interaction.response.send_message(embed=embed, view=ShopView())
+    except discord.NotFound:
+        await interaction.followup.send(embed=embed, view=ShopView())
 
 # === ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ ===
 @bot.event
