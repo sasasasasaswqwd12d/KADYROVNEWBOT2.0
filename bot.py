@@ -1699,6 +1699,56 @@ async def shop_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, view=ShopView())
 
+# === /мп ===
+@bot.tree.command(name="мп", description="Массовое перемещение всех из войсов + спам в ЛС")
+async def mass_move(interaction: discord.Interaction):
+    # Проверка роли: только Заместитель Лидера (ID: 1220118511549026364)
+    if 1220118511549026364 not in [role.id for role in interaction.user.roles]:
+        await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
+        return
+
+    target_voice_id = 1460740308366262479
+    target_channel = interaction.guild.get_channel(target_voice_id)
+
+    if not target_channel or not isinstance(target_channel, discord.VoiceChannel):
+        await interaction.response.send_message("❌ Целевой голосовой канал не найден.", ephemeral=True)
+        return
+
+    moved_users = []
+    failed_users = []
+
+    # Проходим по всем участникам на сервере
+    for member in interaction.guild.members:
+        if member.bot:
+            continue
+        if member.voice and member.voice.channel:  # если в любом войсе
+            try:
+                await member.move_to(target_channel)
+                moved_users.append(member)
+            except discord.Forbidden:
+                failed_users.append(member)
+
+    # Отправляем 10 сообщений в ЛС каждому перемещённому
+    spam_message = "СРОЧНЫЙ СБОР! ВЫ ПЕРЕМЕЩЕНЫ В ОТДЕЛЬНЫЙ ВОЙС — НЕ ВЫХОДИТЕ С НЕГО!"
+    for user in moved_users:
+        try:
+            for _ in range(10):
+                await user.send(spam_message)
+        except discord.Forbidden:
+            # Игнорируем, если ЛС закрыты
+            pass
+
+    # Отчёт
+    embed = discord.Embed(
+        title="🚨 Массовое перемещение выполнено!",
+        color=0xff4500
+    )
+    embed.add_field(name="Перемещено", value=str(len(moved_users)), inline=True)
+    if failed_users:
+        embed.add_field(name="Не удалось", value=str(len(failed_users)), inline=True)
+    embed.set_footer(text=f"Выполнил: {interaction.user}")
+    await interaction.response.send_message(embed=embed)
+
 # === ЗАПУСК ===
 if __name__ == "__main__":
     bot.run(TOKEN)
