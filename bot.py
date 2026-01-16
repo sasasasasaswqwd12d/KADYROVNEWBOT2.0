@@ -765,7 +765,7 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
         return
 
     embed = discord.Embed(
-        title="🔥 Открыты заявки в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!",
+        title="🔥 Открыты заявки в **ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ**!",
         description=(
             "✨ **Здравый и дружный коллектив**\n"
             "🎮 **Постоянный контент и активности**\n"
@@ -804,7 +804,7 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
     await interaction.followup.send(embed=embed, view=ApplyButton())
 
 # === МОДАЛЬНОЕ ОКНО ЗАЯВКИ ===
-class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ"):
+class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ"):
     def __init__(self, target_channel: discord.TextChannel):
         super().__init__()
         self.target_channel = target_channel
@@ -893,7 +893,7 @@ class ApplicationControlView(discord.ui.View):
     @discord.ui.button(label="📞 Вызвать на обзвон", style=discord.ButtonStyle.blurple, emoji="🔊")
     async def call_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await self.applicant.send("🔔 **Вы вызваны на обзвон в семью `ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ`!**\nЗайдите в любой открытый голосовой канал.")
+            await self.applicant.send("🔔 **Вы вызваны на обзвон в семью `ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ`!**\nЗайдите в любой открытый голосовой канал.")
             await interaction.response.send_message("✅ Уведомление отправлено.", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("❌ Не удалось отправить ЛС.", ephemeral=True)
@@ -1343,6 +1343,7 @@ class ChanceModal(discord.ui.Modal, title="🔮 Шанс"):
         embed.set_footer(text=f"Баланс: ${new_balance:,}")
         await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
 
+# === 🎡 РУЛЕТКА — ИСПРАВЛЕНА (x36 при точном совпадении) ===
 class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
     def __init__(self, min_bet=1000, user_id=None):
         super().__init__()
@@ -1578,6 +1579,7 @@ async def ban_casino(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 # === /магазин ===
+# 🔸 ИСПРАВЛЕНО: "100B_1" → "100B"
 SHOP_ROLES = {
     1461403128330190982: 1_000_000,      # ЛУДИК
     1461403410124374282: 2_500_000,      # АЛЬТУХА
@@ -1593,7 +1595,7 @@ SHOP_ROLES = {
 VIRT_ITEMS = {
     "10B": {"name": "10.000.000.000 ВИРТОВ на trace", "price": 10_000_000},
     "50B": {"name": "50.000.000.000 ВИРТОВ на trace", "price": 20_000_000},
-    "100B_1": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 30_000_000},
+    "100B": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 30_000_000},  # ← ИСПРАВЛЕНО!
     "150B": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 500_000_000}
 }
 
@@ -1650,7 +1652,10 @@ async def shop_command(interaction: discord.Interaction):
                 embed_resp.set_footer(text=f"Баланс: ${get_balance(inter.user.id):,}")
                 await inter.response.send_message(embed=embed_resp)
             elif choice.startswith("virt_"):
-                key = choice.split("_")[1]
+                key = choice.split("_", 1)[1]  # защита от подчёркиваний в названии
+                if key not in VIRT_ITEMS:
+                    await inter.response.send_message("❌ Товар не найден.", ephemeral=True)
+                    return
                 item = VIRT_ITEMS[key]
                 price = item["price"]
                 if balance < price:
