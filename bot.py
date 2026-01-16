@@ -508,9 +508,11 @@ def get_thread_link(user_id: int) -> str:
 @bot.event
 async def on_ready():
     print(f'✅ Бот {bot.user} запущен!')
-    print(f'💡 Отправьте "!sync" для синхронизации слэш-команд.')
-    bot.loop.create_task(change_status())
-    bot.loop.create_task(backup_task())
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Синхронизировано {len(synced)} слэш-команд.")
+    except Exception as e:
+        print(f"❌ Ошибка синхронизации: {e}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
