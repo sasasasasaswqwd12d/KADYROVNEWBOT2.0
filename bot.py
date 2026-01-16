@@ -17,10 +17,11 @@ if not TOKEN:
 
 OWNER_ID = 1425864152563585158
 
-# === ID РОЛЕЙ ===
+# === ID РОЛЕЙ И КАНАЛОВ ===
 LEADER_ROLE_ID = 605829120974258203
 DEPUTY_LEADER_ROLE_ID = 1220118511549026364
 FAMILY_MEMBER_ROLE_ID = 1460692962139836487
+THREADS_CHANNEL_ID = 1461051713967620196  # Канал для веток
 
 FAMILY_ROLES = {
     "member": FAMILY_MEMBER_ROLE_ID,
@@ -36,12 +37,12 @@ SHOP_ROLES = {
     1461403128330190982: 1_000_000,      # ЛУДИК
     1461403410124374282: 2_500_000,      # АЛЬТУХА
     1461403437756584126: 2_500_000,      # МЕРИКРИСТМАС
-    1461403169342099626: 10_000_000,     # ПОВЕЛИТЕЛЬ
-    1461403469175849137: 50_000_000,     # БИГ БОСС
-    1461403498053767219: 100_000_000,    # СУПЕР БОСС
-    1461403526302531686: 150_000_000,    # КОРОЛЬ ПЛАНЕТЫ
-    1461403355145572444: 500_000_000,    # ТОП 1 ФОРБС
-    1461403584360091651: 10_000_000_000   # РОЛЬ С ПРАВАМИ МОДЕРАТОРА
+    1461403169342099626: 3_000_000,     # ПОВЕЛИТЕЛЬ
+    1461403469175849137: 3_400_000,     # БИГ БОСС
+    1461403498053767219: 5_000_000,    # СУПЕР БОСС
+    1461403526302531686: 5_500_000,    # КОРОЛЬ ПЛАНЕТЫ
+    1461403355145572444: 10_000_000,    # ТОП 1 ФОРБС
+    1461403584360091651: 100_000_000   # РОЛЬ С ПРАВАМИ МОДЕРАТОРА
 }
 
 # === ТОВАРЫ (вирты) ===
@@ -70,7 +71,7 @@ intents.message_content = True
 intents.members = True
 intents.voice_states = True
 intents.presences = True
-intents.guilds = True  # для отслеживания изменений на сервере
+intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -154,6 +155,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS security_violations (
             user_id INTEGER PRIMARY KEY,
             strikes INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+
+    # Ветки участников
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_threads (
+            user_id INTEGER PRIMARY KEY,
+            thread_url TEXT NOT NULL
         )
     ''')
 
@@ -469,6 +478,22 @@ def reset_strikes(user_id: int):
     cursor.execute("DELETE FROM security_violations WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+
+# === ФУНКЦИИ ДЛЯ ВЕТОК ===
+def save_thread_link(user_id: int, thread_url: str):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO user_threads (user_id, thread_url) VALUES (?, ?)", (user_id, thread_url))
+    conn.commit()
+    conn.close()
+
+def get_thread_link(user_id: int) -> str:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT thread_url FROM user_threads WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
 
 # === СОБЫТИЯ ===
 @bot.event
@@ -883,10 +908,48 @@ class ApplicationControlView(discord.ui.View):
     @discord.ui.button(label="✅ Одобрено", style=discord.ButtonStyle.green, emoji="🟢")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await self.applicant.send("🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅ𝑦ʀᴏᴠ ꜰᴀᴍǫ**!")
+            await self.applicant.send("🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!")
             role = interaction.guild.get_role(FAMILY_ROLES["member"])
             if role and role not in self.applicant.roles:
                 await self.applicant.add_roles(role)
+        except discord.Forbidden:
+            pass
+
+        # === ОТПРАВКА ИНСТРУКЦИИ НОВИЧКУ ===
+        try:
+            welcome_msg = (
+                "🛡️ **Добро пожаловать в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ!**\n\n"
+                "Чтобы стать полноценным участником семьи, выполните следующие шаги:\n\n"
+
+                "1️⃣ **Заполните профиль**\n"
+                "→ Пропишите команду `/профиль`\n"
+                "→ Укажите свой никнейм и Static ID\n\n"
+
+                "2️⃣ **Создайте личную ветку**\n"
+                "→ Перейдите в канал <#1461051713967620196>\n"
+                "→ Нажмите «Создать ветку»\n"
+                "→ Название: `ВашНик | StaticID`\n"
+                "→ Отправьте **ссылку на ветку** этому боту в ЛС\n\n"
+
+                "3️⃣ **Присылайте скриншоты активности**\n"
+                "→ Когда будете кататься на МП от семьи — делайте скрины\n"
+                "→ Присылайте их **этому боту в ЛС**\n"
+                "→ Бот автоматически отправит их в вашу ветку с пингом лидеров!\n\n"
+
+                "4️⃣ **Казино и развлечения**\n"
+                "→ `/казино` — играйте в кости, слоты, рулетку\n"
+                "→ `/work` — зарабатывайте $10 000 каждые 5 минут\n"
+                "→ `/магазин` — покупайте роли и вирты\n\n"
+
+                "5️⃣ **Правила поведения**\n"
+                "→ ❌ Нельзя оскорблять, фрикать, троллить\n"
+                "→ ❌ Запрещено попрошайничать\n"
+                "→ ✅ Будьте активны в голосовых каналах, когда находитесь на сервере\n\n"
+
+                "💡 **Совет**: чем активнее вы — тем быстрее получите высокий ранг!\n"
+                "Удачи, брат! 💪"
+            )
+            await self.applicant.send(welcome_msg)
         except discord.Forbidden:
             pass
 
@@ -975,8 +1038,8 @@ async def family_members(interaction: discord.Interaction):
         (FAMILY_ROLES["leader"], "[Лидер]"),
         (FAMILY_ROLES["deputy_leader"], "[Заместитель Лидера]"),
         (FAMILY_ROLES["high_staff"], "[ʜɪɢʜ sᴛᴀꜰꜰ]"),
-        (FAMILY_ROLES["main_staff"], "[ᴍᴀɪɴ sᴛᴀꜰꜰ]"),
-        (FAMILY_ROLES["recruit"], "[ʀᴇᴄʀᴜɪᴛ]")
+        (FAMILY_ROLES["recruit"], "[ʀᴇᴄʀᴜɪᴛ]"),
+        (FAMILY_ROLES["main_staff"], "[ᴍᴀɪɴ sᴛᴀꜰꜰ]")
     ]
 
     embed = discord.Embed(
@@ -1015,7 +1078,7 @@ async def family_members(interaction: discord.Interaction):
 
     if len(embed) > 6000:
         embed = discord.Embed(
-            title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅ𝑦ʀᴏᴠ ꜰᴀᴍǫ**",
+            title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**",
             description="Семья слишком велика для отображения.",
             color=0xc41e3a
         )
@@ -1361,7 +1424,6 @@ class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
                 result = f"🎯 БИНГО! Вы угадали число **{bot_number}**!\nВы выиграли **${prize:,}**!"
                 color = 0x2ecc71
             else:
-                # Редкий случай: выигрыш без совпадения (для 10%)
                 prize = amount * 2
                 set_balance(inter.user.id, balance - amount + prize)
                 result = f"✨ Удача на вашей стороне! Вы выиграли **${prize:,}**!\nВыпало число: {bot_number}"
@@ -1640,6 +1702,74 @@ async def shop_command(interaction: discord.Interaction):
                 await inter.response.send_message(embed=embed_resp)
 
     await interaction.response.send_message(embed=embed, view=ShopView())
+
+# === ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ ===
+@bot.event
+async def on_message(message):
+    # Игнорируем сообщения бота и не-ЛС
+    if message.author == bot.user or message.guild is not None:
+        return
+
+    content = message.content.strip()
+
+    # Если прислали ссылку на ветку
+    if "https://discord.com/channels/" in content:
+        try:
+            parts = content.split("/")
+            thread_id = int(parts[-1])
+            thread = await bot.fetch_channel(thread_id)
+
+            if thread.parent_id == THREADS_CHANNEL_ID:
+                save_thread_link(message.author.id, content)
+                await message.channel.send("✅ Ссылка на ветку сохранена! Теперь присылайте скриншоты активности.")
+            else:
+                await message.channel.send("❌ Эта ветка не из канала для заявок.")
+        except (ValueError, discord.NotFound, IndexError):
+            await message.channel.send("❌ Неверная ссылка на ветку.")
+        return
+
+    # Если прислали скриншот
+    if message.attachments:
+        thread_url = get_thread_link(message.author.id)
+        if not thread_url:
+            await message.channel.send("❌ Сначала отправьте ссылку на свою ветку!")
+            return
+
+        try:
+            parts = thread_url.split("/")
+            thread_id = int(parts[-1])
+            thread = await bot.fetch_channel(thread_id)
+
+            embed = discord.Embed(
+                title="📸 Новая активность",
+                description=f"Участник {message.author.mention} прислал скриншот:",
+                color=0x2ecc71,
+                timestamp=discord.utils.utcnow()
+            )
+            embed.set_image(url=message.attachments[0].url)
+
+            leader = message.guild.get_role(LEADER_ROLE_ID)
+            deputy = message.guild.get_role(DEPUTY_LEADER_ROLE_ID)
+            ping_text = ""
+            if leader:
+                ping_text += leader.mention + " "
+            if deputy:
+                ping_text += deputy.mention
+
+            await thread.send(content=ping_text, embed=embed)
+            await message.channel.send("✅ Скриншот отправлен в вашу ветку!")
+
+        except Exception as e:
+            await message.channel.send("❌ Не удалось отправить скриншот. Убедитесь, что ветка существует.")
+        return
+
+    # Автоответ на любое другое сообщение
+    await message.channel.send(
+        "ℹ️ **Подсказка**:\n"
+        "- Чтобы зарегистрировать ветку — пришлите ссылку на неё\n"
+        "- Чтобы отправить скриншот — просто прикрепите изображение\n"
+        "- Команды работают только на сервере!"
+    )
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
