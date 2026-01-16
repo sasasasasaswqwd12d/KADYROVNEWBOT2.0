@@ -48,9 +48,8 @@ SHOP_ROLES = {
 VIRT_ITEMS = {
     "10B": {"name": "10.000.000.000 ВИРТОВ на trace", "price": 10_000_000},
     "50B": {"name": "50.000.000.000 ВИРТОВ на trace", "price": 20_000_000},
-    "100B_1": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 50_000_000},
-    "100B_2": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 50_000_000},
-    "150B": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 100_000_000}
+    "100B_1": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 30_000_000},
+    "150B": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 50_000_000}
 }
 
 NOTIFY_CHANNEL_ID = 1461410158109397110
@@ -71,6 +70,7 @@ intents.message_content = True
 intents.members = True
 intents.voice_states = True
 intents.presences = True
+intents.guilds = True  # для отслеживания изменений на сервере
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -139,6 +139,21 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS casino_ban (
             user_id INTEGER PRIMARY KEY
+        )
+    ''')
+
+    # Вайт-лист
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS white_list (
+            user_id INTEGER PRIMARY KEY
+        )
+    ''')
+
+    # Нарушения безопасности
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS security_violations (
+            user_id INTEGER PRIMARY KEY,
+            strikes INTEGER NOT NULL DEFAULT 0
         )
     ''')
 
@@ -415,6 +430,46 @@ async def backup_task():
             backup_guild(guild)
         await asyncio.sleep(3600)
 
+# === ФУНКЦИИ БЕЗОПАСНОСТИ ===
+def is_in_white_list(user_id: int) -> bool:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM white_list WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+def add_to_white_list(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO white_list (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_strikes(user_id: int) -> int:
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT strikes FROM security_violations WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+def add_strike(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    current = get_strikes(user_id)
+    cursor.execute("INSERT OR REPLACE INTO security_violations (user_id, strikes) VALUES (?, ?)", (user_id, current + 1))
+    conn.commit()
+    conn.close()
+    return current + 1
+
+def reset_strikes(user_id: int):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM security_violations WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
 # === СОБЫТИЯ ===
 @bot.event
 async def on_ready():
@@ -484,6 +539,106 @@ async def sync_command(ctx):
         await ctx.send(f"✅ Синхронизировано {len(synced)} слэш-команд.")
     except Exception as e:
         await ctx.send(f"❌ Ошибка: {e}")
+
+# === /выдать_вайт ===
+@bot.tree.command(name="выдать_вайт", description="Добавить пользователя в вайт-лист")
+@app_commands.describe(member="Участник")
+async def give_white(interaction: discord.Interaction, member: discord.Member):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.", ephemeral=True)
+        return
+
+    add_to_white_list(member.id)
+    embed = discord.Embed(
+        title="🛡️ Вайт-лист",
+        description=f"Владелец {interaction.user.mention} добавил {member.mention} в вайт-лист.",
+        color=0x2ecc71
+    )
+    await interaction.response.send_message(embed=embed)
+
+# === СИСТЕМА БЕЗОПАСНОСТИ ===
+@bot.event
+async def on_guild_channel_delete(channel):
+    await handle_security_violation(channel.guild, channel.last_message.author if channel.last_message else None, "удаление канала")
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    if before.name != after.name or before.overwrites != after.overwrites:
+        async for entry in after.guild.audit_logs(action=discord.AuditLogAction.channel_update, limit=1):
+            if entry.target.id == after.id:
+                await handle_security_violation(after.guild, entry.user, "редактирование канала")
+                break
+
+@bot.event
+async def on_guild_role_delete(role):
+    async for entry in role.guild.audit_logs(action=discord.AuditLogAction.role_delete, limit=1):
+        if entry.target.id == role.id:
+            await handle_security_violation(role.guild, entry.user, "удаление роли")
+            break
+
+@bot.event
+async def on_guild_role_update(before, after):
+    if before.name != after.name or before.permissions != after.permissions or before.color != after.color:
+        async for entry in after.guild.audit_logs(action=discord.AuditLogAction.role_update, limit=1):
+            if entry.target.id == after.id:
+                await handle_security_violation(after.guild, entry.user, "редактирование роли")
+                break
+
+async def handle_security_violation(guild, user, action):
+    if not user or user.bot or user.id == bot.user.id:
+        return
+
+    # Владелец и вайт-лист игнорируются
+    if user.id == OWNER_ID or is_in_white_list(user.id):
+        return
+
+    # Участники семьи
+    if not any(role.id in FAMILY_ROLES.values() for role in user.roles):
+        return
+
+    strikes = add_strike(user.id)
+    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+
+    if strikes == 1:
+        # Снимаем все роли семьи
+        roles_to_remove = [role for role in user.roles if role.id in FAMILY_ROLES.values()]
+        if roles_to_remove:
+            await user.remove_roles(*roles_to_remove)
+        embed = discord.Embed(
+            title="⚠️ Нарушение безопасности",
+            description=f"Участник {user.mention} совершил действие: **{action}**.\nСняты все роли семьи.",
+            color=0xffa500
+        )
+        if log_channel:
+            await log_channel.send(embed=embed)
+
+    elif strikes == 2:
+        # Кик с сервера
+        try:
+            await user.kick(reason="2 нарушения безопасности")
+            embed = discord.Embed(
+                title="🚨 Второе нарушение",
+                description=f"Участник {user.mention} был **кикнут** за повторное нарушение: **{action}**.",
+                color=0xff4500
+            )
+            if log_channel:
+                await log_channel.send(embed=embed)
+        except discord.Forbidden:
+            pass
+
+    elif strikes >= 3:
+        # Бан на сервере
+        try:
+            await user.ban(reason="3+ нарушения безопасности")
+            embed = discord.Embed(
+                title="⛔ Третье нарушение",
+                description=f"Участник {user.mention} был **забанен** за множественные нарушения: **{action}**.",
+                color=0xff0000
+            )
+            if log_channel:
+                await log_channel.send(embed=embed)
+        except discord.Forbidden:
+            pass
 
 # === /чс_семьи ===
 @bot.tree.command(name="чс_семьи", description="Выдать чёрный список семьи участнику")
@@ -860,7 +1015,7 @@ async def family_members(interaction: discord.Interaction):
 
     if len(embed) > 6000:
         embed = discord.Embed(
-            title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**",
+            title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅ𝑦ʀᴏᴠ ꜰᴀᴍǫ**",
             description="Семья слишком велика для отображения.",
             color=0xc41e3a
         )
