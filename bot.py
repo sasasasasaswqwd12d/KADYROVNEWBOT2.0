@@ -14,51 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("❌ Файл .env должен содержать DISCORD_TOKEN=ваш_токен")
-
 OWNER_ID = 1425864152563585158
-
-# === ID РОЛЕЙ ===
-LEADER_ROLE_ID = 605829120974258203
-DEPUTY_LEADER_ROLE_ID = 1220118511549026364
-FAMILY_MEMBER_ROLE_ID = 1460692962139836487
-FAMILY_ROLES = {
-    "member": FAMILY_MEMBER_ROLE_ID,
-    "main_staff": 1460692954812387472,
-    "recruit": 1460692951494688967,
-    "high_staff": 1460692948458143848,
-    "deputy_leader": DEPUTY_LEADER_ROLE_ID,
-    "leader": LEADER_ROLE_ID
-}
-
-# === МАГАЗИН РОЛЕЙ ===
-SHOP_ROLES = {
-    1461403128330190982: 1_000_000,      # ЛУДИК
-    1461403410124374282: 2_500_000,      # АЛЬТУХА
-    1461403437756584126: 2_500_000,      # МЕРИКРИСТМАС
-    1461403169342099626: 3_000_000,     # ПОВЕЛИТЕЛЬ
-    1461403469175849137: 3_000_000,     # БИГ БОСС
-    1461403498053767219: 5_000_000,    # СУПЕР БОСС
-    1461403526302531686: 6_000_000,    # КОРОЛЬ ПЛАНЕТЫ
-    1461403355145572444: 10_000_000,    # ТОП 1 ФОРБС
-    1461403584360091651: 100_000_000   # РОЛЬ С ПРАВАМИ МОДЕРАТОРА
-}
-
-# === ТОВАРЫ (вирты) ===
-VIRT_ITEMS = {
-    "10B": {"name": "10.000.000.000 ВИРТОВ на trace", "price": 10_000_000},
-    "50B": {"name": "50.000.000.000 ВИРТОВ на trace", "price": 20_000_000},
-    "100B_1": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 30_000_000},
-    "150B": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 50_000_000}
-}
-
-NOTIFY_CHANNEL_ID = 1461410158109397110
-LOG_CHANNEL_ID = 1461033301170192414
-MANAGE_APPLICATIONS_ROLES = [
-    FAMILY_ROLES["recruit"],
-    FAMILY_ROLES["high_staff"],
-    FAMILY_ROLES["deputy_leader"],
-    FAMILY_ROLES["leader"]
-]
 
 os.makedirs("backups", exist_ok=True)
 
@@ -145,10 +101,60 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    ''')
+
     conn.commit()
     conn.close()
 
 init_db()
+
+# === ФУНКЦИИ КОНФИГУРАЦИИ ===
+def set_config(key: str, value: str):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+def get_config(key: str, default=None):
+    conn = sqlite3.connect("voice_data.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM config WHERE key = ?", (key,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else default
+
+def get_family_roles(guild: discord.Guild):
+    return {
+        "member": guild.get_role(int(get_config("family_role_id", 0))),
+        "leader": guild.get_role(int(get_config("leader_role_id", 0))),
+        "deputy_leader": guild.get_role(int(get_config("deputy_leader_role_id", 0))),
+        "high_staff": guild.get_role(int(get_config("high_staff_role_id", 0))),
+        "main_staff": guild.get_role(int(get_config("main_staff_role_id", 0))),
+        "recruit": guild.get_role(int(get_config("recruit_role_id", 0))),
+    }
+
+def get_log_channel(guild: discord.Guild):
+    cid = get_config("log_channel_id")
+    return guild.get_channel(int(cid)) if cid else None
+
+def get_notify_channel(guild: discord.Guild):
+    cid = get_config("notify_channel_id")
+    return guild.get_channel(int(cid)) if cid else None
+
+def get_threads_channel(guild: discord.Guild):
+    cid = get_config("threads_channel_id")
+    return guild.get_channel(int(cid)) if cid else None
+
+def has_any_role(member: discord.Member, roles: list) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    return any(role in member.roles for role in roles if role)
 
 # === ФУНКЦИИ ДЛЯ РАБОТЫ С БД ===
 def get_balance(user_id: int) -> int:
@@ -193,11 +199,13 @@ def unban_from_casino(user_id: int):
     conn.close()
 
 def get_all_family_members(guild: discord.Guild) -> list:
+    roles = get_family_roles(guild)
+    valid_ids = {r.id for r in roles.values() if r}
     members = []
     for member in guild.members:
         if member.bot:
             continue
-        if any(role.id in FAMILY_ROLES.values() for role in member.roles):
+        if any(role.id in valid_ids for role in member.roles):
             members.append(member)
     return members
 
@@ -287,7 +295,7 @@ def get_blacklist_reason(user_id: int) -> str:
 
 # === УБРАНО ОГРАНИЧЕНИЕ НА ЗАЯВКИ ===
 def can_submit_application(user_id: int) -> bool:
-    return True  # Разрешено подавать заявку сколько угодно раз
+    return True
 
 def record_application(user_id: int):
     conn = sqlite3.connect("voice_data.db")
@@ -343,7 +351,7 @@ def get_profile(user_id: int):
     return result
 
 async def log_action(guild, action: str, details: str, color=0x2b2d31):
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    log_channel = get_log_channel(guild)
     if log_channel:
         embed = discord.Embed(
             title="📋 Аудит действий",
@@ -353,12 +361,9 @@ async def log_action(guild, action: str, details: str, color=0x2b2d31):
         )
         await log_channel.send(embed=embed)
 
-def has_any_role(member: discord.Member, role_ids: list) -> bool:
-    if member.guild_permissions.administrator:
-        return True
-    return any(role.id in role_ids for role in member.roles)
-
 def backup_guild(guild: discord.Guild):
+    roles = get_family_roles(guild)
+    valid_ids = {r.id for r in roles.values() if r}
     data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "guild_id": guild.id,
@@ -368,7 +373,7 @@ def backup_guild(guild: discord.Guild):
     for member in guild.members:
         if member.bot:
             continue
-        roles = [role.id for role in member.roles if role.id in FAMILY_ROLES.values()]
+        roles = [role.id for role in member.roles if role.id in valid_ids]
         if roles:
             data["members"].append({
                 "user_id": member.id,
@@ -471,7 +476,8 @@ async def on_member_update(before, after):
     added_roles = set(after.roles) - set(before.roles)
     if not added_roles:
         return
-    family_role_ids = set(FAMILY_ROLES.values())
+    roles = get_family_roles(after.guild)
+    family_role_ids = {r.id for r in roles.values() if r}
     given_family_roles = [r for r in added_roles if r.id in family_role_ids]
     if not given_family_roles or not is_in_family_blacklist(after.id):
         return
@@ -560,14 +566,16 @@ async def handle_security_violation(guild, user, action):
         return
     if user.id == OWNER_ID or is_in_white_list(user.id):
         return
-    if not any(role.id in FAMILY_ROLES.values() for role in user.roles):
+    roles = get_family_roles(guild)
+    family_role_ids = {r.id for r in roles.values() if r}
+    if not any(role.id in family_role_ids for role in user.roles):
         return
 
     strikes = add_strike(user.id)
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    log_channel = get_log_channel(guild)
 
     if strikes == 1:
-        roles_to_remove = [role for role in user.roles if role.id in FAMILY_ROLES.values()]
+        roles_to_remove = [role for role in user.roles if role.id in family_role_ids]
         if roles_to_remove:
             await user.remove_roles(*roles_to_remove)
         embed = discord.Embed(
@@ -602,11 +610,68 @@ async def handle_security_violation(guild, user, action):
         except discord.Forbidden:
             pass
 
+# === /привязка ===
+@bot.tree.command(name="привязка", description="Настроить роли и каналы семьи (только владелец)")
+@app_commands.describe(
+    общая_роль="Основная роль участника семьи",
+    лидер="Роль лидера",
+    заместитель="Роль заместителя",
+    high_staff="Роль high staff",
+    main_staff="Роль main staff",
+    recruit="Роль recruit",
+    канал_логов="Канал для логирования действий",
+    канал_уведомлений="Канал для уведомлений (казино, вирты)",
+    канал_веток="Канал, где создаются личные ветки"
+)
+async def setup_bindings(
+    interaction: discord.Interaction,
+    общая_роль: discord.Role,
+    лидер: discord.Role,
+    заместитель: discord.Role,
+    high_staff: discord.Role,
+    main_staff: discord.Role,
+    recruit: discord.Role,
+    канал_логов: discord.TextChannel,
+    канал_уведомлений: discord.TextChannel,
+    канал_веток: discord.TextChannel
+):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("❌ Только владелец может использовать эту команду.", ephemeral=True)
+        return
+
+    set_config("family_role_id", str(общая_роль.id))
+    set_config("leader_role_id", str(лидер.id))
+    set_config("deputy_leader_role_id", str(заместитель.id))
+    set_config("high_staff_role_id", str(high_staff.id))
+    set_config("main_staff_role_id", str(main_staff.id))
+    set_config("recruit_role_id", str(recruit.id))
+    set_config("log_channel_id", str(канал_логов.id))
+    set_config("notify_channel_id", str(канал_уведомлений.id))
+    set_config("threads_channel_id", str(канал_веток.id))
+
+    embed = discord.Embed(
+        title="✅ Привязка завершена!",
+        description="Все роли и каналы успешно сохранены.",
+        color=0x00ff00
+    )
+    embed.add_field(name="Общая роль", value=общая_роль.mention, inline=False)
+    embed.add_field(name="Лидер", value=лидер.mention, inline=True)
+    embed.add_field(name="Заместитель", value=заместитель.mention, inline=True)
+    embed.add_field(name="High Staff", value=high_staff.mention, inline=True)
+    embed.add_field(name="Main Staff", value=main_staff.mention, inline=True)
+    embed.add_field(name="Recruit", value=recruit.mention, inline=True)
+    embed.add_field(name="Канал логов", value=канал_логов.mention, inline=False)
+    embed.add_field(name="Канал уведомлений", value=канал_уведомлений.mention, inline=False)
+    embed.add_field(name="Канал для веток", value=канал_веток.mention, inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
 # === /чс_семьи ===
 @bot.tree.command(name="чс_семьи", description="Выдать чёрный список семьи участнику")
 @app_commands.describe(user_id="ID пользователя", reason="Причина ЧС")
 async def blacklist_family(interaction: discord.Interaction, user_id: str, reason: str):
-    if FAMILY_ROLES["deputy_leader"] not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     try:
@@ -619,8 +684,8 @@ async def blacklist_family(interaction: discord.Interaction, user_id: str, reaso
         await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
         return
 
-    roles_to_remove = [interaction.guild.get_role(rid) for rid in FAMILY_ROLES.values()]
-    roles_to_remove = [r for r in roles_to_remove if r and r in member.roles]
+    family_role_ids = {r.id for r in roles.values() if r}
+    roles_to_remove = [r for r in roles.values() if r and r in member.roles]
     if roles_to_remove:
         await member.remove_roles(*roles_to_remove)
     add_to_family_blacklist(uid, reason, interaction.user.id)
@@ -647,7 +712,8 @@ async def blacklist_family(interaction: discord.Interaction, user_id: str, reaso
 @bot.tree.command(name="снять_чс", description="Снять чёрный список семьи с участника")
 @app_commands.describe(user_id="ID пользователя")
 async def unblacklist_family(interaction: discord.Interaction, user_id: str):
-    if FAMILY_ROLES["deputy_leader"] not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     try:
@@ -679,7 +745,9 @@ async def unblacklist_family(interaction: discord.Interaction, user_id: str):
 @bot.tree.command(name="набор", description="Открыть набор в указанном канале")
 @app_commands.describe(channel_id="ID канала, куда будут приходить заявки")
 async def recruitment(interaction: discord.Interaction, channel_id: str):
-    allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"]]
+    roles = get_family_roles(interaction.guild)
+    allowed_roles = [roles["leader"], roles["deputy_leader"]]
+    allowed_roles = [r for r in allowed_roles if r]
     if not has_any_role(interaction.user, allowed_roles):
         await interaction.response.send_message("❌ Эта команда доступна только Лидеру и Заместителю.", ephemeral=True)
         return
@@ -733,7 +801,7 @@ async def recruitment(interaction: discord.Interaction, channel_id: str):
             await inter.response.send_modal(modal)
 
     await interaction.response.send_message("✅ Набор открыт! Форма отправлена в этот канал.", ephemeral=True)
-    await interaction.followup.send(embed=embed, view=ApplyButton(), ephemeral=False)
+    await interaction.followup.send(embed=embed, view=ApplyButton())
 
 # === МОДАЛЬНОЕ ОКНО ЗАЯВКИ ===
 class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ"):
@@ -802,18 +870,22 @@ class ApplicationModal(discord.ui.Modal, title="Заявка в ᴋᴀᴅʏʀᴏ
         detail_value = self.details.value[:1020] + ("..." if len(self.details.value) > 1020 else "")
         embed.add_field(name="ℹ️ Детали", value=detail_value, inline=False)
         embed.set_footer(text=f"Заявитель: {interaction.user} | ID: {interaction.user.id}")
-        view = ApplicationControlView(applicant=interaction.user)
+        view = ApplicationControlView(applicant=interaction.user, guild=interaction.guild)
         await self.target_channel.send(embed=embed, view=view)
         await interaction.response.send_message("✅ Ваша заявка отправлена! Ожидайте обзвона.", ephemeral=True)
 
 # === УПРАВЛЕНИЕ ЗАЯВКОЙ ===
 class ApplicationControlView(discord.ui.View):
-    def __init__(self, applicant: discord.Member):
+    def __init__(self, applicant: discord.Member, guild: discord.Guild):
         super().__init__(timeout=None)
         self.applicant = applicant
+        self.guild = guild
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
+        roles = get_family_roles(self.guild)
+        manage_roles = [roles["recruit"], roles["high_staff"], roles["deputy_leader"], roles["leader"]]
+        manage_roles = [r for r in manage_roles if r]
+        if not has_any_role(interaction.user, manage_roles):
             await interaction.response.send_message("❌ У вас нет прав для управления заявками.", ephemeral=True)
             return False
         return True
@@ -828,11 +900,14 @@ class ApplicationControlView(discord.ui.View):
 
     @discord.ui.button(label="✅ Одобрено", style=discord.ButtonStyle.green, emoji="🟢")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        threads_ch = get_threads_channel(self.guild)
+        thread_mention = f"<#{threads_ch.id}>" if threads_ch else "указанный канал"
+
         welcome_message = (
-            "🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**!\n\n"
+            "🎉 **Поздравляем!** Вы приняты в **ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ**!\n\n"
             "📌 **ВАЖНО СДЕЛАТЬ СЛЕДУЮЩЕЕ:**\n"
             "1️⃣ Напишите в ЛС боту команду **`/профиль`** и заполните свой никнейм и Static ID.\n"
-            "2️⃣ Перейдите в канал <#1461051713967620196>, создайте **личную ветку**, в названии укажите ваш **ник и Static ID**, затем отправьте ссылку на эту ветку боту для одобрения.\n\n"
+            f"2️⃣ Перейдите в канал {thread_mention}, создайте **личную ветку**, в названии укажите ваш **ник и Static ID**, затем отправьте ссылку на эту ветку боту для одобрения.\n\n"
             "📜 **Правила семьи:**\n"
             "• Фриковать нельзя.\n"
             "• Оскорблять участников нельзя.\n"
@@ -842,9 +917,9 @@ class ApplicationControlView(discord.ui.View):
         )
         try:
             await self.applicant.send(welcome_message)
-            role = interaction.guild.get_role(FAMILY_ROLES["member"])
-            if role and role not in self.applicant.roles:
-                await self.applicant.add_roles(role)
+            roles = get_family_roles(self.guild)
+            if roles["member"] and roles["member"] not in self.applicant.roles:
+                await self.applicant.add_roles(roles["member"])
         except discord.Forbidden:
             pass
 
@@ -856,7 +931,7 @@ class ApplicationControlView(discord.ui.View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.response.defer()
         await log_action(
-            interaction.guild,
+            self.guild,
             "Заявка одобрена",
             f"Заявитель: {self.applicant.mention}\nОдобрил: {interaction.user.mention}",
             color=0x00ff00
@@ -902,7 +977,10 @@ class RejectReasonModal(discord.ui.Modal, title="Причина отказа"):
 # === /статус_заявок ===
 @bot.tree.command(name="статус_заявок", description="Показать статус обработки заявок")
 async def application_status(interaction: discord.Interaction):
-    if not has_any_role(interaction.user, MANAGE_APPLICATIONS_ROLES):
+    roles = get_family_roles(interaction.guild)
+    manage_roles = [roles["recruit"], roles["high_staff"], roles["deputy_leader"], roles["leader"]]
+    manage_roles = [r for r in manage_roles if r]
+    if not has_any_role(interaction.user, manage_roles):
         await interaction.response.send_message("❌ У вас нет прав для просмотра статуса заявок.", ephemeral=True)
         return
     pending_count = get_pending_applications_count()
@@ -920,20 +998,21 @@ async def application_status(interaction: discord.Interaction):
 # === /состав_семьи ===
 @bot.tree.command(name="состав_семьи", description="Показать состав семьи по рангам")
 async def family_members(interaction: discord.Interaction):
-    if not any(role.id == FAMILY_ROLES["member"] for role in interaction.user.roles):
+    roles = get_family_roles(interaction.guild)
+    if not roles["member"] or roles["member"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
         return
 
     rank_order = [
-        (FAMILY_ROLES["leader"], "[Лидер]"),
-        (FAMILY_ROLES["deputy_leader"], "[Заместитель Лидера]"),
-        (FAMILY_ROLES["high_staff"], "[ʜɪɢʜ sᴛᴀꜰꜰ]"),
-        (FAMILY_ROLES["main_staff"], "[ᴍᴀɪɴ sᴛᴀꜰꜰ]"),
-        (FAMILY_ROLES["recruit"], "[ʀᴇᴄʀᴜɪᴛ]")
+        (roles["leader"], "[Лидер]"),
+        (roles["deputy_leader"], "[Заместитель Лидера]"),
+        (roles["high_staff"], "[ʜɪɢʜ sᴛᴀꜰꜰ]"),
+        (roles["main_staff"], "[ᴍᴀɪɴ sᴛᴀꜰꜰ]"),
+        (roles["recruit"], "[ʀᴇᴄʀᴜɪᴛ]")
     ]
 
     embed = discord.Embed(
-        title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**",
+        title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ**",
         color=0xc41e3a,
         timestamp=discord.utils.utcnow()
     )
@@ -945,8 +1024,7 @@ async def family_members(interaction: discord.Interaction):
         discord.Status.offline: "⚫ Не в сети"
     }
 
-    for role_id, rank_name in rank_order:
-        role = interaction.guild.get_role(role_id)
+    for role, rank_name in rank_order:
         if not role:
             continue
         members = [m for m in role.members if not m.bot]
@@ -967,7 +1045,7 @@ async def family_members(interaction: discord.Interaction):
 
     if len(embed) > 6000:
         embed = discord.Embed(
-            title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ**",
+            title="👨‍👩‍👧‍👦 Состав семьи **ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ**",
             description="Семья слишком велика для отображения.",
             color=0xc41e3a
         )
@@ -977,7 +1055,9 @@ async def family_members(interaction: discord.Interaction):
 @bot.tree.command(name="состояние", description="Показать статистику пользователя по голосовым каналам")
 @app_commands.describe(user="Пользователь для проверки")
 async def user_state(interaction: discord.Interaction, user: discord.User):
-    allowed_roles = [FAMILY_ROLES["leader"], FAMILY_ROLES["deputy_leader"], 1460688847267565744]
+    roles = get_family_roles(interaction.guild)
+    allowed_roles = [roles["leader"], roles["deputy_leader"]]
+    allowed_roles = [r for r in allowed_roles if r]
     if not has_any_role(interaction.user, allowed_roles):
         await interaction.response.send_message("❌ У вас нет прав для просмотра статистики.", ephemeral=True)
         return
@@ -1013,7 +1093,8 @@ async def user_state(interaction: discord.Interaction, user: discord.User):
 # === /профиль ===
 @bot.tree.command(name="профиль", description="Заполнить свой профиль семьи")
 async def profile_command(interaction: discord.Interaction):
-    if FAMILY_MEMBER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["member"] or roles["member"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
         return
 
@@ -1045,7 +1126,8 @@ async def profile_command(interaction: discord.Interaction):
 @bot.tree.command(name="посмотреть_профиль", description="Просмотреть профиль участника")
 @app_commands.describe(member="Участник для просмотра")
 async def view_profile(interaction: discord.Interaction, member: discord.Member):
-    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     profile = get_profile(member.id)
@@ -1067,7 +1149,8 @@ async def view_profile(interaction: discord.Interaction, member: discord.Member)
 @bot.tree.command(name="восстановить_состав", description="Восстановить состав семьи из бэкапа")
 @app_commands.describe(date="Дата бэкапа (формат: YYYY-MM-DD_HH-MM)")
 async def restore_backup(interaction: discord.Interaction, date: str):
-    if LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["leader"] or roles["leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Только Лидер может восстанавливать состав.", ephemeral=True)
         return
     filepath = f"backups/backup_{date}.json"
@@ -1100,9 +1183,6 @@ async def restore_backup(interaction: discord.Interaction, date: str):
     )
     embed.add_field(name="Файл", value=f"`{date}.json`", inline=False)
     await interaction.response.send_message(embed=embed)
-
-# === ОСТАЛЬНЫЕ КОМАНДЫ (казино, работа и т.д.) остаются без изменений ===
-# ... (остальной код казино, магазина, работы и т.д. полностью совпадает с исходным)
 
 # === КАЗИНО ===
 # === /баланс ===
@@ -1268,41 +1348,64 @@ class RouletteModal(discord.ui.Modal, title="🎡 Рулетка"):
         super().__init__()
         self.min_bet = min_bet
         self.user_id = user_id
-        self.number = discord.ui.TextInput(label="Число (1-36)", placeholder="1-36", required=True, max_length=2)
-        self.bet = discord.ui.TextInput(label=f"Ставка (мин. ${min_bet:,})", placeholder="Сумма", required=True, max_length=10)
+        self.number = discord.ui.TextInput(
+            label="Число (1–36)",
+            placeholder="Введите число от 1 до 36",
+            required=True,
+            max_length=2
+        )
+        self.bet = discord.ui.TextInput(
+            label=f"Ставка (мин. ${min_bet:,})",
+            placeholder="Сумма",
+            required=True,
+            max_length=10
+        )
         self.add_item(self.number)
         self.add_item(self.bet)
 
     async def on_submit(self, inter: discord.Interaction):
+        # Проверка числа
         try:
             number = int(self.number.value)
+        except ValueError:
+            await inter.response.send_message("❌ Число должно быть целым (1–36).", ephemeral=True)
+            return
+        if number < 1 or number > 36:
+            await inter.response.send_message("❌ Число должно быть от 1 до 36.", ephemeral=True)
+            return
+
+        # Проверка ставки
+        try:
             amount = int(self.bet.value.replace(",", "").replace(" ", ""))
         except ValueError:
-            await inter.response.send_message("❌ Число и сумма должны быть числами.", ephemeral=True)
+            await inter.response.send_message("❌ Сумма должна быть числом.", ephemeral=True)
             return
-        if number < 1 or number > 36 or amount < self.min_bet or amount > get_balance(inter.user.id):
-            await inter.response.send_message("❌ Неверные данные.", ephemeral=True)
+        if amount < self.min_bet:
+            await inter.response.send_message(f"❌ Минимальная ставка: ${self.min_bet:,}.", ephemeral=True)
             return
+        if amount > get_balance(inter.user.id):
+            await inter.response.send_message("❌ Недостаточно средств на балансе.", ephemeral=True)
+            return
+
+        # Списываем ставку
         balance = get_balance(inter.user.id)
         set_balance(inter.user.id, balance - amount)
+
+        # Крутим рулетку
         bot_number = random.randint(1, 36)
-        if random.random() < 0.1:  # 10%
-            if number == bot_number:
-                prize = amount * 36
-                set_balance(inter.user.id, balance - amount + prize)
-                result = f"🎯 БИНГО! Вы угадали число **{bot_number}**!\nВы выиграли **${prize:,}**!"
-                color = 0x2ecc71
-            else:
-                prize = amount * 2
-                set_balance(inter.user.id, balance - amount + prize)
-                result = f"✨ Удача на вашей стороне! Вы выиграли **${prize:,}**!\nВыпало число: {bot_number}"
-                color = 0x2ecc71
+
+        if number == bot_number:
+            prize = amount * 36
+            set_balance(inter.user.id, balance - amount + prize)
+            result = f"🎯 **БИНГО!** Вы угадали число **{bot_number}**!\nВы выиграли **${prize:,}** (ставка ×36)!"
+            color = 0x2ecc71
         else:
             result = f"🔴 Выпало число **{bot_number}**. Вы проиграли **${amount:,}**."
             color = 0xe74c3c
+
         new_balance = get_balance(inter.user.id)
         embed = discord.Embed(title="🎡 Рулетка", description=result, color=color)
-        embed.set_footer(text=f"Баланс: ${new_balance:,}")
+        embed.set_footer(text=f"Ваш баланс: ${new_balance:,}")
         await inter.response.edit_message(embed=embed, view=create_casino_view(self.user_id))
 
 # === /казино ===
@@ -1313,7 +1416,7 @@ async def casino_command(interaction: discord.Interaction):
         return
     balance = get_balance(interaction.user.id)
     embed = discord.Embed(
-        title="🎰 Казино ᴋᴀᴅʏʀᴏᴠ ꜰᴀᴍǫ",
+        title="🎰 Казино ᴋᴀᴅʸʀᴏᴠ ꜰᴀᴍǫ",
         description=f"{interaction.user.mention}, ваш баланс: **${balance:,}**\nВыберите игру:",
         color=0x9b59b6
     )
@@ -1345,7 +1448,8 @@ async def top_casino(interaction: discord.Interaction):
 # === /work ===
 @bot.tree.command(name="work", description="Работать и получить $10,000")
 async def work_command(interaction: discord.Interaction):
-    if not any(role.id == FAMILY_MEMBER_ROLE_ID for role in interaction.user.roles):
+    roles = get_family_roles(interaction.guild)
+    if not roles["member"] or roles["member"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только участникам семьи.", ephemeral=True)
         return
     if not can_work(interaction.user.id):
@@ -1366,7 +1470,8 @@ async def work_command(interaction: discord.Interaction):
 @bot.tree.command(name="выдать_денег", description="Выдать деньги участнику")
 @app_commands.describe(member="Участник", amount="Сумма в долларах")
 async def give_money(interaction: discord.Interaction, member: discord.Member, amount: int):
-    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     if amount <= 0:
@@ -1387,7 +1492,8 @@ async def give_money(interaction: discord.Interaction, member: discord.Member, a
 @bot.tree.command(name="обнулить_баланс", description="Обнулить баланс участника за нарушения")
 @app_commands.describe(member="Участник")
 async def reset_balance(interaction: discord.Interaction, member: discord.Member):
-    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     old_balance = get_balance(member.id)
@@ -1403,7 +1509,8 @@ async def reset_balance(interaction: discord.Interaction, member: discord.Member
 # === /обнулить_всех ===
 @bot.tree.command(name="обнулить_всех", description="Обнулить балансы всех участников семьи")
 async def reset_all_balances(interaction: discord.Interaction):
-    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     members = get_all_family_members(interaction.guild)
@@ -1425,7 +1532,8 @@ async def reset_all_balances(interaction: discord.Interaction):
 @bot.tree.command(name="выдать_всем_деньги", description="Выдать деньги всем участникам семьи")
 @app_commands.describe(amount="Сумма в долларах")
 async def give_money_to_all(interaction: discord.Interaction, amount: int):
-    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     if amount <= 0:
@@ -1454,7 +1562,8 @@ async def give_money_to_all(interaction: discord.Interaction, amount: int):
 @bot.tree.command(name="бан_казино", description="Забанить участника в казино")
 @app_commands.describe(member="Участник")
 async def ban_casino(interaction: discord.Interaction, member: discord.Member):
-    if DEPUTY_LEADER_ROLE_ID not in [role.id for role in interaction.user.roles]:
+    roles = get_family_roles(interaction.guild)
+    if not roles["deputy_leader"] or roles["deputy_leader"] not in interaction.user.roles:
         await interaction.response.send_message("❌ Эта команда доступна только Заместителю Лидера.", ephemeral=True)
         return
     if is_casino_banned(member.id):
@@ -1469,6 +1578,25 @@ async def ban_casino(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 # === /магазин ===
+SHOP_ROLES = {
+    1461403128330190982: 1_000_000,      # ЛУДИК
+    1461403410124374282: 2_500_000,      # АЛЬТУХА
+    1461403437756584126: 2_500_000,      # МЕРИКРИСТМАС
+    1461403169342099626: 3_000_000,     # ПОВЕЛИТЕЛЬ
+    1461403469175849137: 3_000_000,     # БИГ БОСС
+    1461403498053767219: 5_000_000,    # СУПЕР БОСС
+    1461403526302531686: 6_000_000,    # КОРОЛЬ ПЛАНЕТЫ
+    1461403355145572444: 10_000_000,    # ТОП 1 ФОРБС
+    1461403584360091651: 100_000_000   # РОЛЬ С ПРАВАМИ МОДЕРАТОРА
+}
+
+VIRT_ITEMS = {
+    "10B": {"name": "10.000.000.000 ВИРТОВ на trace", "price": 10_000_000},
+    "50B": {"name": "50.000.000.000 ВИРТОВ на trace", "price": 20_000_000},
+    "100B_1": {"name": "100.000.000.000 ВИРТОВ на trace", "price": 30_000_000},
+    "150B": {"name": "150.000.000.000 ВИРТОВ на trace", "price": 500_000_000}
+}
+
 @bot.tree.command(name="магазин", description="Купить роль или вирты")
 async def shop_command(interaction: discord.Interaction):
     balance = get_balance(interaction.user.id)
@@ -1529,7 +1657,7 @@ async def shop_command(interaction: discord.Interaction):
                     await inter.response.send_message("❌ Недостаточно средств!", ephemeral=True)
                     return
                 set_balance(inter.user.id, balance - price)
-                notify_channel = inter.guild.get_channel(NOTIFY_CHANNEL_ID)
+                notify_channel = get_notify_channel(inter.guild)
                 if notify_channel:
                     item_embed = discord.Embed(
                         title="📦 Заказ виртов",
